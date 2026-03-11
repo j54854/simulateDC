@@ -1,2 +1,32 @@
 # simulateDC
-python based simulation models of distribution centers
+物流センターのシミュレーションモデル in Python
+
+## 準備
+uvの利用を想定しています（他の環境でも動くと思います）．  
+
+$ uv init .  
+$ uv python pin 3.12  
+$ uv add -r requirements.txt  
+$ uv sync  
+
+仮想環境に出入りする方法は下記の通り  
+
+$ source .venv/bin/activate  
+$ deactivate  
+
+ただし，uvでは，仮想環境に入らなくても，下記のコマンドで仮想環境からコードを実行可能  
+
+$ uv run your_code.py
+
+## Goods To Person System (gtps)
+複数の系列・階層・置場を持つ SBSRS (Shuttle-Based Storage and Retrieval System) を備えたGTP方式の物流センターのモデルです，各系列の各階層にそれぞれ1台のシャトルユニットがあり，それらが，コンベヤを介して，同系列の階層間をつなぐリフトユニットに繋がっています．各系列のリフトの1階に出口があり，それらがコンベヤを介して，1つのループユニットに繋がっています．ループユニットには，ピッキング作業場も複数，コンベヤを介して，接続されています．そして，複数の台車がループを周回しながら倉庫と作業場の間でバケットの受け渡しを行います．ピッキング作業を終えたバケットは，空でない限り，倉庫に戻されます．リフトとその前後のコンベヤ，作業場の前後のコンベヤは，出庫用と入庫用に分けられていますが，シャトルユニットは，入出庫兼用になっています．  
+
+シミュレータを走らせて，結果をcsvでdataフォルダに書き出すだけなら，  
+
+$ uv run gtpsim_run.py  
+
+シミュレーションの過程を動画で確認したいときは，  
+
+$ uv run gtpsim_movie.py.  
+
+とすればOKです．

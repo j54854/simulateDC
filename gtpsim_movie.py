@@ -9,10 +9,22 @@ HEIGHT = 880
 FRAME_RATE = 60
 TIME_PER_FRAME = 0.5
 
+# ---------- * ---------- * ---------- * ---------- * ----------
+def create_simulator():
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-class MyConfig(DefaultConfig):
-# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    CONSOLE_OUT = False  # コンソールへの書き出し
+    env = simpy.Environment()
+
+    env.CONSOLE_OUT = False  # コンソールへの書き出し
+    env.PJOB = 10 # ピッキングジョブ数
+    env.VEHICLE = 30  # ループの台車数
+    env.OPENABLE = 5  # 同時に開封可能なバケット数
+    env.RELEASABLE = 50  # GTPシステムに投入可能な搬送ジョブ数
+    env.FAILURE_LIMIT = 3  # 許容される荷卸し失敗回数（これを超えると置場に戻される）
+
+    env.gtps = GTPSystem(env)
+    # env.gtps = MyGTPSystem(env, shtl_cls=MyShuttle, lift_cls=MyLift, loop_cls=MyLoop)
+    env.gameover = env.event()
+    return env
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 def main():
@@ -20,7 +32,7 @@ def main():
     random.seed(SEED)
 
     # simpyの環境設定
-    env = create_simulator(config=MyConfig)
+    env = create_simulator()
     set_node_positions(env.gtps, WIDTH, HEIGHT)
 
     # pygameの初期設定

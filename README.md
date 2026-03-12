@@ -23,10 +23,10 @@ $ uv run your_code.py
 
 シミュレータを走らせて，結果をcsvでdataフォルダに書き出すだけなら，  
 
-$ uv run gtpsim_run.py  
+$ uv run run_gtpsim.py  
 
 シミュレーションの過程を動画で確認したいときは，  
 
-$ uv run gtpsim_movie.py.  
+$ uv run show_gtpsim.py.  
 
 とすればOKです．

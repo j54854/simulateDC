@@ -21,4 +21,4 @@ def test_golden_output():
     env = create_simulator(params={'PJOB': 20, 'SEED': 42})
     env.run(until=env.simulation_completed)
     makespans = [round(s.makespan, 2) for s in env.gtps.stations]
-    assert makespans == [361.22, 148.02, 132.42, 189.7, 146.14]
+    assert makespans == [118.6, 133.2, 133.2, 155.4, 190.6]

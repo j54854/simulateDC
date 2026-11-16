@@ -56,24 +56,64 @@ def check_invariants(env, graph):
             between = {graph.nodes[n]['pjob'] for n in tjob_nodes
                        if graph.nodes[n]['picker'] == du['picker'] and du['pjob'] < graph.nodes[n]['pjob'] < dv['pjob']}
             assert du['pjob'] < dv['pjob'] and not between
-    # コンベヤ上の対象 TJob はセル順どおり（下流 -> 上流）に chain で結ばれる
-    conveyors = [gtps.conveyors[2][p][0][Direction.FORWARD] for p in range(env.PICKER)]
-    conveyors += [gtps.conveyors[1][a][0][Direction.FORWARD] for a in range(env.AISLE)]
-    conveyors += [gtps.conveyors[0][a][f][Direction.FORWARD] for a in range(env.AISLE) for f in range(env.FLOOR)]
-    for conveyor in conveyors:
+    # station は同じ作業場行きのノード間のみで，台車上の TJob からは張らない
+    # aisle はループより上流の，同じ系列の TJob 間のみ
+    upstream = {'conv1', 'lift', 'conv0', 'shuttle', 'store', 'beyond_store'}
+    for u, v, d in graph.edges(data=True):
+        if d['kind'] == 'station':
+            du, dv = graph.nodes[u], graph.nodes[v]
+            assert du['picker'] == dv['picker']
+            assert du.get('position') != 'car'
+        if d['kind'] == 'aisle':
+            du, dv = graph.nodes[u], graph.nodes[v]
+            assert du['position'] in upstream and dv['position'] in upstream
+            assert du['aisle'] == dv['aisle']
+    # コンベヤ上の対象 TJob はセル順どおり（下流 -> 上流）に結ばれる（conv2 は station，conv1・conv0 は aisle）
+    fw = Direction.FORWARD
+    conveyors = [(gtps.conveyors[2][p][0][fw], 'station') for p in range(env.PICKER)]
+    conveyors += [(gtps.conveyors[1][a][0][fw], 'aisle') for a in range(env.AISLE)]
+    conveyors += [(gtps.conveyors[0][a][f][fw], 'aisle') for a in range(env.AISLE) for f in range(env.FLOOR)]
+    for conveyor, kind in conveyors:
         keys = [tjob_key(c.bucket.current_tjob()) for c in reversed(conveyor.cells) if c.bucket is not None]
         for u, v in zip(keys, keys[1:]):
-            assert graph.has_edge(u, v, key='chain')
+            assert graph.has_edge(u, v, key=kind)
     # 全エッジの長さは非負
     assert all(edge_length(d) >= 0 for _, _, d in graph.edges(data=True))
 
 
-@pytest.mark.parametrize('params', [
-    {'PJOB': 50, 'SEED': 42},
-    {'PJOB': 50, 'SEED': 1, 'OPENABLE': 1},  # バケットの共有（off_route・bucket エッジ）を起こす
-])
-def test_invariants_on_snapshots(params):
-    """シミュレーション中の各時点のグラフが仕様上の不変条件を満たす"""
+# conv2 列の最上流からループより上流の各位置への station エッジの内訳 (n_unit, alphas, n_beta)（手計算）
+# 台車の出口側 1 + 入口側 α_loop，conv1 -> リフト 1 + α_lift，conv0 -> シャトル 1 + α_shuttle，置場 -> 向こう側 β
+STATION_UPSTREAM_COST = {
+    'conv1': (1, ('loop',), 0),
+    'lift': (2, ('loop',), 0),
+    'conv0': (2, ('loop', 'lift'), 0),
+    'shuttle': (3, ('loop', 'lift'), 0),
+    'store': (3, ('loop', 'lift', 'shuttle'), 0),
+    'beyond_store': (3, ('loop', 'lift', 'shuttle'), 1),
+}
+
+
+def check_station_edges(env, graph):
+    station_edges = [(u, v, d) for u, v, d in graph.edges(data=True) if d['kind'] == 'station']
+    to_conv2 = {u for u, v, d in station_edges if graph.nodes[v]['position'] == 'conv2'}  # conv2 列の最上流でないノード
+    for u, v, d in station_edges:
+        position = graph.nodes[v]['position']
+        cost = (d['n_unit'], d['alphas'], d['n_beta'])
+        if position in ('conv2', 'car'):  # 作業場 -> conv2 の直列は隣接，台車へは出口側で，いずれも長さ 1
+            assert cost == (1, (), 0)
+        else:  # ループより上流へは手計算の内訳どおり
+            assert cost == STATION_UPSTREAM_COST[position]
+        if position != 'conv2':  # 台車・上流へは conv2 列の最上流（conv2 が空なら作業場ノード）から張る
+            assert u not in to_conv2
+    # ループより上流の各 TJob には，行先作業場からの station エッジがちょうど1本入る
+    for n, d in graph.nodes(data=True):
+        if d.get('position') in STATION_UPSTREAM_COST:
+            sources = [u for u, v, k in graph.in_edges(n, keys=True) if k == 'station']
+            assert len(sources) == 1
+
+
+def run_snapshots(params, check):
+    """シミュレーション中，時間1ごとにグラフを構築して check(env, graph) を呼ぶ"""
     env = create_simulator(params=params)
     tjob_graph = TJobGraph(env.gtps)
     checked = []
@@ -81,12 +121,30 @@ def test_invariants_on_snapshots(params):
     def sampler(env):
         while True:
             yield env.timeout(1)
-            check_invariants(env, tjob_graph.update())
+            check(env, tjob_graph.update())
             checked.append(env.now)
 
     env.process(sampler(env))
     env.run(until=env.simulation_completed)
-    assert len(checked) > 0
+    return checked
+
+
+SNAPSHOT_PARAMS = [
+    {'PJOB': 50, 'SEED': 42},
+    {'PJOB': 50, 'SEED': 1, 'OPENABLE': 1},  # バケットの共有（off_route・bucket エッジ）を起こす
+]
+
+
+@pytest.mark.parametrize('params', SNAPSHOT_PARAMS)
+def test_invariants_on_snapshots(params):
+    """シミュレーション中の各時点のグラフが仕様上の不変条件を満たす"""
+    assert len(run_snapshots(params, check_invariants)) > 0
+
+
+@pytest.mark.parametrize('params', SNAPSHOT_PARAMS)
+def test_station_edge_costs(params):
+    """station エッジの長さの内訳が手計算の値と一致し，上流の各 TJob に1本ずつ入る"""
+    assert len(run_snapshots(params, check_station_edges)) > 0
 
 
 def test_edge_length():

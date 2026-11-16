@@ -25,7 +25,7 @@ ALPHA_LOOP = Cost(alphas=('loop',))
 ALPHA_LIFT = Cost(alphas=('lift',))
 ALPHA_SHUTTLE = Cost(alphas=('shuttle',))
 
-# ループより上流の各位置について，conv1 の位置からの境界の累積（direct エッジ用）
+# ループより上流の各位置について，conv1 の位置からの境界の累積（station エッジの上流側用）
 UPSTREAM_COST = {
     'conv1': Cost(),
     'lift': UNIT,
@@ -86,9 +86,8 @@ class TJobGraph:
         self.graph = nx.MultiDiGraph()
         self.scan()
         self.add_nodes()
-        self.add_station_side_edges()
-        self.add_upstream_edges()
-        self.add_direct_edges()
+        self.add_station_edges()
+        self.add_aisle_edges()
         self.add_precedence_edges()
         self.add_bucket_edges()
         return self.graph
@@ -188,62 +187,54 @@ class TJobGraph:
     def add_edge(self, u: tuple, v: tuple, kind: str, cost: Cost) -> None:
         self.graph.add_edge(u, v, key=kind, kind=kind, n_unit=cost.n_unit, alphas=cost.alphas, n_beta=cost.n_beta)
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def visit(self, frontier: list[tuple[tuple, Cost]], tjob: TJob) -> list[tuple[tuple, Cost]]:
-        # フロンティアの各要素から当該TJobにchainエッジを張り，フロンティアを当該TJobで置き換える
+    def visit(self, frontier: list[tuple[tuple, Cost]], tjob: TJob, kind: str) -> list[tuple[tuple, Cost]]:
+        # フロンティアの各要素から当該TJobにエッジを張り，フロンティアを当該TJobで置き換える
         for u, cost in frontier:
-            self.add_edge(u, tjob_key(tjob), 'chain', cost)
+            self.add_edge(u, tjob_key(tjob), kind, cost)
         return [(tjob_key(tjob), Cost())]
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def visit_conveyor(self, frontier: list[tuple[tuple, Cost]], tjobs: list[TJob]) -> list[tuple[tuple, Cost]]:
+    def visit_conveyor(self, frontier: list[tuple[tuple, Cost]], tjobs: list[TJob], kind: str) -> list[tuple[tuple, Cost]]:
         # コンベヤ上のTJobを下流から順にたどる（隣接は長さ1，空のコンベヤは何も加えない）
         for i, tjob in enumerate(tjobs):
             if i > 0:
                 frontier = advance(frontier, UNIT)
-            frontier = self.visit(frontier, tjob)
+            frontier = self.visit(frontier, tjob, kind)
         return frontier
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def add_station_side_edges(self) -> None:  # start エッジと作業場側の chain エッジ
+    def add_station_edges(self) -> None:  # start エッジと，同じ作業場行きのTJob間の station エッジ
+        upstream = [tjob for tjob in self.members if self.position[tjob] in UPSTREAM_COST]
         for picker in range(self.env.PICKER):
             self.add_edge(START, self.station_node[picker], 'start', Cost())
             frontier = [(self.station_node[picker], Cost())]
             for tjob in self.conv2[picker]:  # 作業場ノードを conv2 列の最下流要素とみなす
-                frontier = self.visit(advance(frontier, UNIT), tjob)
+                frontier = self.visit(advance(frontier, UNIT), tjob, 'station')
+            tail, cost = frontier[0]  # conv2 列の最上流（conv2 が空なら作業場ノード）
             for tjob in self.cars[picker]:  # 台車へは並列（台車の出口側は長さ1）
-                self.add_edge(frontier[0][0], tjob_key(tjob), 'chain', frontier[0][1].plus(UNIT))
+                self.add_edge(tail, tjob_key(tjob), 'station', cost.plus(UNIT))
+            skip_car = cost.plus(UNIT).plus(ALPHA_LOOP)  # 空の台車を飛ばす扱い（出口側の1と入口側のα）
+            for tjob in upstream:  # ループより上流へは，追い越しがありうるので台車を介さず conv2 列の最上流から
+                if tjob.pjob.station.picker == picker:
+                    self.add_edge(tail, tjob_key(tjob), 'station', skip_car.plus(UPSTREAM_COST[self.position[tjob]]))
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def add_upstream_edges(self) -> None:  # ループより上流の chain エッジ
+    def add_aisle_edges(self) -> None:  # ループより上流で同じ系列にいるTJob間の aisle エッジ
         for aisle in range(self.env.AISLE):
-            frontier = []  # 上流側の鎖は direct エッジでのみ下流とつながる
-            frontier = self.visit_conveyor(frontier, self.conv1[aisle])
+            frontier = []  # 系列の鎖は station エッジでのみ下流とつながる
+            frontier = self.visit_conveyor(frontier, self.conv1[aisle], 'aisle')
             frontier = advance(frontier, UNIT)  # conv1 -> リフト（出口側）
             if self.lift[aisle] is not None:
-                frontier = self.visit(frontier, self.lift[aisle])
+                frontier = self.visit(frontier, self.lift[aisle], 'aisle')
             frontier = advance(frontier, ALPHA_LIFT)  # リフト -> conv0（入口側）
             for floor in range(self.env.FLOOR):  # 階層ごとに分岐
-                floor_frontier = self.visit_conveyor(list(frontier), self.conv0[aisle][floor])
+                floor_frontier = self.visit_conveyor(list(frontier), self.conv0[aisle][floor], 'aisle')
                 floor_frontier = advance(floor_frontier, UNIT)  # conv0 -> シャトル（出口側）
                 if self.shuttle[aisle][floor] is not None:
-                    floor_frontier = self.visit(floor_frontier, self.shuttle[aisle][floor])
+                    floor_frontier = self.visit(floor_frontier, self.shuttle[aisle][floor], 'aisle')
                 floor_frontier = advance(floor_frontier, ALPHA_SHUTTLE)  # シャトル -> 置場（入口側）
                 for u, cost in floor_frontier:  # 置場待ちと置場の向こう側は並列（フロンティアは更新しない）
                     for tjob in self.store[aisle][floor]:
-                        self.add_edge(u, tjob_key(tjob), 'chain', cost)
+                        self.add_edge(u, tjob_key(tjob), 'aisle', cost)
                     for tjob in self.beyond_store[aisle][floor]:
-                        self.add_edge(u, tjob_key(tjob), 'chain', cost.plus(BETA))
-# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def add_direct_edges(self) -> None:  # 台車からループより上流の同じ作業場行きの全TJobへ
-        upstream = [tjob for tjob in self.members if self.position[tjob] in UPSTREAM_COST]
-        for picker in range(self.env.PICKER):
-            if len(self.cars[picker]) > 0:
-                sources = [(tjob_key(tjob), ALPHA_LOOP) for tjob in self.cars[picker]]
-            else:  # 台車がなければ conv2 列の最上流から（空の台車を飛ばすので出口側の1を加える）
-                tail = tjob_key(self.conv2[picker][-1]) if self.conv2[picker] else self.station_node[picker]
-                sources = [(tail, UNIT.plus(ALPHA_LOOP))]
-            for tjob in upstream:
-                if tjob.pjob.station.picker != picker:
-                    continue
-                for u, cost in sources:
-                    self.add_edge(u, tjob_key(tjob), 'direct', cost.plus(UPSTREAM_COST[self.position[tjob]]))
+                        self.add_edge(u, tjob_key(tjob), 'aisle', cost.plus(BETA))
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def add_precedence_edges(self) -> None:  # 同じ作業場の隣り合うPJobのTJob間
         for picker in range(self.env.PICKER):

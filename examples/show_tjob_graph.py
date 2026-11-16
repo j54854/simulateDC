@@ -23,8 +23,8 @@ CONVEYORS = ('conv2', 'conv1', 'conv0')  # セル順で並べる位置
 NODE_COLORS = {'start': 'darkgray', 'station': 'lightgray'}  # ダミーノードの色（TJobは行先作業場で色分け）
 EDGE_STYLES = {  # 種類ごとの色・線種・曲がり具合（重なりを避ける）
     'start': ('black', 'solid', 0.0),
-    'chain': ('tab:blue', 'solid', 0.0),
-    'direct': ('tab:orange', 'dotted', 0.15),
+    'station': ('tab:blue', 'solid', 0.0),
+    'aisle': ('tab:orange', 'solid', 0.15),
     'precedence': ('tab:green', 'dashed', -0.2),
     'bucket': ('tab:purple', 'solid', 0.3),
     }
@@ -124,7 +124,7 @@ def main():
     parser.add_argument('--time', type=float, default=50, help='グラフを構築する時刻')
     parser.add_argument('--pjob', type=int, default=100, help='ピッキングジョブ数')
     parser.add_argument('--seed', type=int, default=1234, help='乱数シード')
-    parser.add_argument('--kinds', default='start,chain,direct,precedence,bucket', help='描画するエッジの種類（カンマ区切り）')
+    parser.add_argument('--kinds', default='start,station,aisle,precedence,bucket', help='描画するエッジの種類（カンマ区切り）')
     parser.add_argument('--no-cycles', action='store_true', help='閉路の強調表示をしない')
     parser.add_argument('--out', default=None, help='保存先（省略時は data/tjob_graph_t<時刻>.png）')
     parser.add_argument('--show', action='store_true', help='ウィンドウに表示する')

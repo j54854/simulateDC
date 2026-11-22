@@ -66,4 +66,5 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()` で出力する�
 - `docs/parameters.md` — パラメータのデフォルト値・単位・説明
 - `docs/controller_api.md` — コントローラ API リファレンス
 - `docs/tjob_lifecycle.md` — TJob の状態遷移と，各状態でのバケット所在・保持データ構造
+- `docs/operation_graph.md` — オペレーショングラフ（TJob を仕事，設備を機械とする no-buffer の先行関係グラフ）の定義．TJob グラフはこれを縮約したものと位置づける
 - `docs/tjob_graph.md` — TJob グラフ（`gtp/graph.py`）の仕様．グラフ関連の作業前に必ず参照

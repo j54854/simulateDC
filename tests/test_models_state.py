@@ -1,3 +1,4 @@
+import csv
 import pytest
 from gtp import create_simulator
 from gtp.models import Progress, Station
@@ -66,6 +67,11 @@ def test_history(params):
     for tjob in tjobs:
         times = [stamp.time for stamp in tjob.history]
         assert times == sorted(times), tjob
+        # 先頭の記録は投入で，1回だけ
+        creates = [stamp for stamp in tjob.history if stamp.kind == 'create']
+        assert creates == tjob.history[:1], tjob
+        assert creates[0].time == tjob.released_time
+        assert creates[0].progress == Progress.TO_FW_SHTL
         proceeds = [stamp for stamp in tjob.history if stamp.kind == 'proceed']
         assert proceeds[-1].progress == Progress.DONE, tjob
         assert proceeds[-1].time == tjob.restored_time
@@ -95,3 +101,27 @@ def test_failures_and_retries_are_recorded():
         restarts = [stamp for stamp in tjob.history
                     if stamp.kind == 'proceed' and stamp.progress == Progress.TO_FW_SHTL]
         assert len(restarts) == tjob.retry_count, tjob
+
+
+@pytest.mark.parametrize('params', PARAMS)
+def test_dump_history(params, tmp_path):
+    env = run_with_checks(params)
+    env.gtps.dump_history(dir=str(tmp_path), fname='history')
+    with open(tmp_path / 'history.csv', newline='') as f:
+        rows = list(csv.DictReader(f))
+    expected = [(pjob, tjob, seq, stamp) for pjob in env.gtps.pjobs for tjob in pjob.tjobs
+                for seq, stamp in enumerate(tjob.history)]
+    assert len(rows) == len(expected)
+    for row, (pjob, tjob, seq, stamp) in zip(rows, expected):
+        assert (int(row['pjob']), int(row['tjob']), int(row['seq'])) == (pjob.idx, tjob.idx, seq)
+        assert float(row['time']) == stamp.time
+        assert (row['kind'], row['progress']) == (stamp.kind, stamp.progress.name)
+        for side, cell in (('src', stamp.src), ('dst', stamp.dst)):
+            columns = (row[f'{side}_type'], row[f'{side}_unit'], row[f'{side}_cell'])
+            if cell is None:
+                assert columns == ('', '', '')
+            else:
+                assert columns == (cell.unit.__class__.__name__, cell.unit.get_label(), str(cell.idx))
+    # ユニットの名称は重複しない
+    units = {cell.unit for cell in actor_cells(env.gtps) +passive_cells(env.gtps)}
+    assert len({unit.get_label() for unit in units}) == len(units)

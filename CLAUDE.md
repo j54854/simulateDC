@@ -19,7 +19,7 @@ uv run examples/show_gtpsim.py            # pygame ウィンドウでアニメ�
 uv run examples/show_tjob_graph.py --time 200   # 時刻200の TJob グラフを data/ に PNG で保存
 ```
 
-CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()` で出力する（`run_gtpsim.py` ではコメントアウトされている）．
+CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブの履歴（`data/gtpsim_history.csv`）は `env.gtps.dump_history()` で出力する（`run_gtpsim.py` ではコメントアウトされている）．
 
 ## アーキテクチャ
 

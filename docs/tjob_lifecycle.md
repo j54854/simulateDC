@@ -123,6 +123,7 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 
 | kind | 記録する場所 | src | dst |
 |---|---|---|---|
+| `create` | `TJob` の生成（投入．時刻は `released_time` と同じ） | — | — |
 | `assign` | `Cell.assign_tjob()`（割付け＝迎車の開始．作業場では搬入の開始） | — | 主体のセル |
 | `release` | `Cell.release_tjob()`（荷卸し・搬出と復帰の終わり） | — | 主体のセル |
 | `transfer` | `Cell.transfer()`（移載の終了） | 移載元のセル | 移載先のセル |
@@ -136,3 +137,27 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
   - Q（搬出の完了）：作業場 → conv2^BW[0] の `transfer` の時刻（空になるバケットは，ピッキング完了の `proceed` の時刻）
   - O（積み出しの完了）：conv2^BW の末尾 → 台車の `transfer` の時刻
 - 空になったバケットを置場へ戻す処理（`Bucket.pick()`）は移載ではないので，`transfer` は記録されない（`proceed` で `DONE` が残る）
+
+### 履歴の CSV 出力（`env.gtps.dump_history()`）
+
+全搬送ジョブの履歴を，1行1件で `data/gtpsim_history.csv` に出力する（出力先は引数 `dir`・`fname` で変更できる）．行は搬送ジョブごとに記録順に並ぶ．`pjob`・`tjob` の組をキーにして，`dump_log()` の出力と結合できる．
+
+| 列 | 内容 |
+|---|---|
+| `pjob`・`tjob` | ピッキングジョブと搬送ジョブの番号 |
+| `seq` | その搬送ジョブの中での記録順（0 始まり．同じ時刻の記録の順序を表す） |
+| `time`・`kind`・`progress` | `Stamp` の値（`progress` は `TO_FW_SHTL` などの名前） |
+| `src_type`・`dst_type` | セルが属するユニットの種類（`Shuttle` など） |
+| `src_unit`・`dst_unit` | ユニットの名称（下表） |
+| `src_cell`・`dst_cell` | ユニット内のセル番号（コンベヤでは上流からの位置，ループでは台車番号） |
+
+`src`・`dst` がない記録では，対応する3列を空欄にする．
+
+| 種類 | 名称の形式 |
+|---|---|
+| `Store` | `Store_{aisle}_{floor}_{row}` |
+| `Shuttle` | `Shuttle_{aisle}_{floor}` |
+| `Conveyor` | `Conveyor_{stage}_{dim0}_{dim1}_{FW または BW}` |
+| `Lift` | `Lift_{aisle}_{FW または BW}` |
+| `Loop` | `Loop` |
+| `Station` | `Station_{picker}` |

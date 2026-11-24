@@ -32,7 +32,7 @@ class Progress(IntEnum):
 class Stamp(NamedTuple):  # 搬送ジョブの履歴の1件（検証用の実績）
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     time: float  # 記録した時刻
-    kind: str  # 'assign'・'release'・'transfer'・'fail'・'proceed' のいずれか
+    kind: str  # 'create'・'assign'・'release'・'transfer'・'fail'・'proceed' のいずれか
     src: Cell | None  # 移載元のセル（'transfer' のみ）
     dst: Cell | None  # 移載先のセル，または主体のセル（'assign'・'release'・'fail'）
     progress: Progress  # 記録した時点の進捗
@@ -285,6 +285,7 @@ class TJob:  # 搬送ジョブ
         self.retry_count = 0  # 再搬送回数
         self.failure_count = 0  # 今回の往路での荷卸し失敗回数（再搬送の開始時に0に戻す）
         self.history = []  # 履歴（Stamp のリスト）
+        self.stamp('create')  # 履歴に記録（投入）
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def __repr__(self) -> str:
         return f"Tjob {self.pjob.idx}-{self.idx}: {{item: {self.bucket.item}, vol: {self.vol}, store: {self.bucket.get_store_address()}, progress: {self.progress}, picked: {self.is_picked()}}}"
@@ -576,6 +577,12 @@ class Unit:  # GTPシステムを構成するユニットの抽象クラス
         self.cells = []  # ユニットを構成するセルのリスト
         self.tjobs = []  # 搬送ジョブのリスト
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用．サブクラスで上書きする）
+        return ()
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_label(self) -> str:  # ユニットの名称（ログ出力用）
+        return '_'.join([self.__class__.__name__, *map(str, self.get_address())])
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def is_blocked(self) -> bool:  # 末尾セルからのバケットの送出しがブロックされているか？
         assert self.nodes[-1].to is not None, 'No connected unit'
         if self.nodes[-1].to.cell is None:  # 台車が未着なら
@@ -605,6 +612,9 @@ class Store(Unit):  # 置場ユニット
         # ノードとセルを対応付ける
         self.cells[0].attach(self.nodes[0])
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用）
+        return self.aisle, self.floor, self.row
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def get_shuttle(self) -> Shuttle:  # 接続されているシャトルユニット
         return self.nodes[0].to.unit
 
@@ -629,6 +639,9 @@ class Shuttle(Unit):  # シャトルユニット
         conveyors[Direction.BACKWARD].nodes[-1].connect_to(self.nodes[env.ROW])
         # 出庫ジョブ到着イベントを初期化
         self.tjob_registered = env.event()
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用）
+        return self.aisle, self.floor
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def register(self, tjob: TJob) -> None:  # 搬送ジョブを登録して，出庫ジョブ到着イベントを発火
         self.tjobs.append(tjob)
@@ -726,6 +739,9 @@ class Conveyor(Unit):  # コンベヤ（上流から順に stage = 0, 1, 2）
         for seg in range(env.CONV_LEN[stage]):
             self.cells[seg].attach(self.nodes[seg])
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用）
+        return self.stage, self.dim0, self.dim1, 'FW' if self.direction == Direction.FORWARD else 'BW'
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def connect_nodes(self) -> None:  # コンベヤ上でセルからセルへバケットを送り出せるようにする
         for seg in range(len(self.nodes) -1):
             self.nodes[seg].connect_to(self.nodes[seg +1])
@@ -770,6 +786,9 @@ class Lift(Unit):  # リフトユニット
             self.nodes[0].connect_to(downward_cvs[Direction.FORWARD].nodes[0])
         else:
             downward_cvs[Direction.BACKWARD].nodes[-1].connect_to(self.nodes[0])
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用）
+        return self.aisle, 'FW' if self.direction == Direction.FORWARD else 'BW'
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def operate(self, env: Simulation_Environment):  # リフトのプロセス関数
         controller = self.env.gtps.controller  # 制御器
@@ -935,8 +954,8 @@ class Loop(Unit):  # ループユニット
         while True:
             if this_car.assigned_tjob is None:  # 搬送ジョブが割り付けられていないなら
                 if this_car.goal is None:  # 行き先が未定で停止中（待機状態）
-                    pushed = this_car.pushed
-                    goal_assigned = this_car.goal_assigned
+                    pushed = this_car.pushed  # 現時点の押出しイベント（発火時に差し替えられるので，待つ直前に受け直す）
+                    goal_assigned = this_car.goal_assigned  # 現時点の行き先ノード設定イベント（発火時に差し替えられるので，待つ直前に受け直す）
                     result = yield (goal_assigned | pushed)  # 行き先が割り付けられるまで待機
                     if not goal_assigned in result:  # 搬送ジョブは割り当てられず，後続台車にプッシュされたら
                         escape_node = self.get_escape_node(car_behind)
@@ -963,6 +982,7 @@ class Loop(Unit):  # ループユニット
                             yield env.process(self.handle_failure(env, vehicle))
                         else:  # 先行関係チェックOK
                             if not this_car.node.to.cell.is_open():  # 荷降ろしがブロックされたら
+                                pushed = this_car.pushed  # 現時点の押出しイベント（発火時に差し替えられるので，待つ直前に受け直す）
                                 result = yield (pushed | this_car.node.to.cell.bucket_sent)
                                 if pushed in result:  # 後続台車にプッシュされたら
                                     yield env.process(self.move_ahead(env, vehicle))  # 前進プロセスを駆動
@@ -1001,6 +1021,9 @@ class Station(Unit):  # 作業場ユニット
         self.total_tjobs = 0  # 処理した搬送ジョブの総数
         self.total_work_time = 0  # 実作業時間の総和（作業場への搬入・搬出時間を除く）
         self.makespan = 0  # 最後の搬送ジョブを搬出し終えた時刻
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def get_address(self) -> tuple[int | str, ...]:  # ユニットの番地（ログ出力用）
+        return (self.picker,)
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def get_utilization(self) -> float:  # 稼働率の計算
         utilized = self.total_tjobs *self.env.MT_CONV *2 +self.total_work_time  # 搬出・搬入時間を加算
@@ -1142,6 +1165,23 @@ class GTPSystem:
                 for tjob in pjob.tjobs:
                     row = [pjob.idx, tjob.idx, pjob.station.picker, tjob.bucket.home_store.aisle, tjob.bucket.home_store.floor, tjob.bucket.home_store.row, tjob.bucket.item, tjob.vol, tjob.released_time, tjob.work_time, tjob.picked_time, tjob.restored_time, tjob.retry_count]
                     writer.writerow(row)
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def dump_history(self, dir: str = 'data/', fname: str = 'gtpsim_history') -> None:  # 搬送ジョブの履歴（Stamp）の出力
+        def cell_columns(cell: Cell | None) -> list[int | str]:  # セルの列（種類・ユニット・セル番号．なければ空欄）
+            if cell is None:
+                return ['', '', '']
+            return [cell.unit.__class__.__name__, cell.unit.get_label(), cell.idx]
+
+        os.makedirs(dir, exist_ok=True)
+        with open(os.path.join(dir, fname +'.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            header = ['pjob', 'tjob', 'seq', 'time', 'kind', 'progress', 'src_type', 'src_unit', 'src_cell', 'dst_type', 'dst_unit', 'dst_cell']
+            writer.writerow(header)
+            for pjob in self.pjobs:
+                for tjob in pjob.tjobs:
+                    for seq, stamp in enumerate(tjob.history):
+                        row = [pjob.idx, tjob.idx, seq, stamp.time, stamp.kind, stamp.progress.name, *cell_columns(stamp.src), *cell_columns(stamp.dst)]
+                        writer.writerow(row)
 
 # ---------- * ---------- * ---------- * ---------- * ----------
 def create_simulator(params: dict | None = None, controller_cls: type[DefaultController] | None = None) -> Simulation_Environment:

@@ -58,6 +58,7 @@ def main():
         print(f'Station {station.picker}: makespan {station.makespan:.2f} utilization {station.get_utilization():.4f}')
 
     # env.gtps.dump_log()
+    # env.gtps.dump_history()
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import sys, os, csv, random
 import logging
 import simpy
 from enum import IntEnum
+from typing import NamedTuple
 
 # DEBUG < INFO < WARNING < ERROR < CRITICAL
 logger = logging.getLogger(__name__)
@@ -26,6 +27,15 @@ class Progress(IntEnum):
     TO_BW_LIFT = 7  # 復路リフト台車からの降車終了前
     TO_BW_SHTL = 8  # 復路シャトル台車からの降車終了前
     DONE       = 9  # 置場への帰還以後
+
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+class Stamp(NamedTuple):  # 搬送ジョブの履歴の1件（検証用の実績）
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    time: float  # 記録した時刻
+    kind: str  # 'assign'・'release'・'transfer'・'fail'・'proceed' のいずれか
+    src: Cell | None  # 移載元のセル（'transfer' のみ）
+    dst: Cell | None  # 移載先のセル，または主体のセル（'assign'・'release'・'fail'）
+    progress: Progress  # 記録した時点の進捗
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 class Simulation_Environment(simpy.Environment):
@@ -273,9 +283,14 @@ class TJob:  # 搬送ジョブ
         self.picked_time = None  # ピッキング完了時刻
         self.restored_time = None  # 搬送ジョブ完了（置場への帰還）時刻
         self.retry_count = 0  # 再搬送回数
+        self.failure_count = 0  # 今回の往路での荷卸し失敗回数（再搬送の開始時に0に戻す）
+        self.history = []  # 履歴（Stamp のリスト）
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def __repr__(self) -> str:
         return f"Tjob {self.pjob.idx}-{self.idx}: {{item: {self.bucket.item}, vol: {self.vol}, store: {self.bucket.get_store_address()}, progress: {self.progress}, picked: {self.is_picked()}}}"
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def stamp(self, kind: str, src: Cell | None = None, dst: Cell | None = None) -> None:  # 履歴に記録
+        self.history.append(Stamp(self.env.now, kind, src, dst, self.progress))
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def is_picked(self) -> bool:
         return self.picked_time is not None  # ピッキングは完了済みか？
@@ -317,16 +332,21 @@ class TJob:  # 搬送ジョブ
         if self.progress == Progress.DONE:  # 搬送ジョブが完了したら
             if self.retry_needed:  # 再搬送が必要なら
                 self.retry_count += 1  # 再搬送回数を増やす
+                self.failure_count = 0  # 荷卸し失敗回数を初期値に戻す
                 self.retry_needed = False  # 再搬送フラグを初期値に戻す
                 self.progress = Progress.TO_FW_SHTL  # 進捗を初期値に戻す
+                self.stamp('proceed')  # 履歴に記録（再搬送の開始）
                 self.bucket.home_store.get_shuttle().register(self)  # シャトルの搬送ジョブリストに再追加
             else:
                 self.restored_time = self.env.now  # 搬送ジョブ完了時刻を登録
+                self.stamp('proceed')  # 履歴に記録（完了）
                 self.env.tjob_restored.succeed()  # 置場への帰還イベントを発火
                 self.env.tjob_restored = self.env.event()
                 self.env.gtps.unrestored_tjobs.remove(self)
                 if self.is_all_restored():  # 全ピッキングジョブが完了したらシミュレーション終了
                     self.env.simulation_completed.succeed()
+        else:
+            self.stamp('proceed')  # 履歴に記録
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def get_goal_node_idx(self) -> int:  # ループ台車の行先ノード
         aisle = self.bucket.home_store.aisle  # 系列番号
@@ -437,9 +457,11 @@ class Cell:  # バケットを保持するセル（台車，置場，作業場�
         self.bucket = None  # 保持しているバケット（双方向参照）
         self.bucket_receipt = env.event()
         self.bucket_sent = env.event()
+        self.assigned_tjob = None  # 占有している搬送ジョブ（迎車の開始から荷卸し・復帰の終わりまで．コンベヤ・置場では常にNone）
+        self.hold_start = None  # 実行中（または直前）の作業の開始時刻
+        self.hold_end = None  # 実行中（または直前）の作業の終了時刻
         if isinstance(self.unit, Loop):  # ループ（を継承しているクラス）の台車なら
             self.goal = None  # 行き先ノード
-            self.tjob = None  # 実行中の搬送ジョブ
             self.is_pushed = False  # 後続台車からの押出しフラグ
             self.goal_assigned = env.event()  # 行き先ノード設定イベント
             self.tjob_completed = env.event()  # 搬送ジョブ完了イベント
@@ -447,7 +469,7 @@ class Cell:  # バケットを保持するセル（台車，置場，作業場�
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def __repr__(self) -> str:
         if isinstance(self.unit, Loop):
-            return f'{self.unit.__class__.__name__}-cell {self.idx}: {{node: {self.node.idx}, goal: {'unset' if self.goal is None else self.goal.node.idx}, tjob: {'unassigned' if self.tjob is None else self.tjob}, bucket: {self.bucket if self.bucket is not None else 'none'}}}'
+            return f'{self.unit.__class__.__name__}-cell {self.idx}: {{node: {self.node.idx}, goal: {'unset' if self.goal is None else self.goal.node.idx}, tjob: {'unassigned' if self.assigned_tjob is None else self.assigned_tjob}, bucket: {self.bucket if self.bucket is not None else 'none'}}}'
         else:
             return f'{self.unit.__class__.__name__}-cell {self.idx}: {{node: {self.node.idx}, bucket: {self.bucket if self.bucket is not None else 'none'}}}'
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
@@ -481,10 +503,16 @@ class Cell:  # バケットを保持するセル（台車，置場，作業場�
         self.bucket = bucket
         bucket.cell = self  # バケットとセルは双方向参照
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def hold(self, delay: float) -> simpy.Timeout:  # 作業の時間遅れ（開始・終了時刻を記録）
+        self.hold_start = self.env.now
+        self.hold_end = self.env.now +delay
+        return self.env.timeout(delay)
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def transfer(self) -> None:  # バケットを次のユニットに積み替える
         assert self.node.to is not None, 'No connected node'
         receiver_cell = self.node.to.cell
         assert receiver_cell is not None, 'No receiver cell to transfer'
+        self.bucket.current_tjob().stamp('transfer', src=self, dst=receiver_cell)  # 履歴に記録
         receiver_cell.receive(self.bucket)  # 受け手側の処理
         self.bucket = None  # 送り手側の処理
         # 受領イベントと送出イベントを発火させる
@@ -499,10 +527,16 @@ class Cell:  # バケットを保持するセル（台車，置場，作業場�
         self.goal_assigned = self.env.event()
         self.is_pushed = False
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def assign_tjob(self, tjob: TJob) -> None:  # 搬送ジョブの割付け（ループ台車のみ）
-        self.tjob = tjob
-        # 新しく搬送ジョブが割り付けられたら，それに応じて行き先ノードを設定
-        self.assign_goal(self.unit.nodes[tjob.get_goal_node_idx()])
+    def assign_tjob(self, tjob: TJob) -> None:  # 搬送ジョブの割付け（シャトル・リフト・台車・作業場）
+        self.assigned_tjob = tjob
+        tjob.stamp('assign', dst=self)  # 履歴に記録
+        if isinstance(self.unit, Loop):  # ループの台車なら
+            # 新しく搬送ジョブが割り付けられたら，それに応じて行き先ノードを設定
+            self.assign_goal(self.unit.nodes[tjob.get_goal_node_idx()])
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def release_tjob(self) -> None:  # 搬送ジョブの割付けの解除
+        self.assigned_tjob.stamp('release', dst=self)  # 履歴に記録
+        self.assigned_tjob = None
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 class Node:  # ユニットの経路グラフのノード
@@ -603,9 +637,9 @@ class Shuttle(Unit):  # シャトルユニット
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def operate(self, env: Simulation_Environment):  # シャトルのプロセス関数
         controller = self.env.gtps.controller  # 制御器
-        current_tjob = None  # 実行中の搬送ジョブ
         direction = Direction.BACKWARD  # （前回の）搬送方向
         while True:
+            current_tjob = self.cells[0].assigned_tjob  # 実行中の搬送ジョブ
             if current_tjob is None:  # 待機中なら
                 fw_tjobs = [tjob for tjob in self.tjobs  # 着手可能な出庫ジョブリスト
                     if tjob.progress == Progress.TO_FW_SHTL  # 進捗が出庫シャトル前である
@@ -628,49 +662,50 @@ class Shuttle(Unit):  # シャトルユニット
                         current_tjob = controller.dispatch_shuttle(self, fw_tjobs)  # 出庫ジョブのディスパッチング
                         direction = Direction.FORWARD  # 搬送方向を出庫に設定
                     self.tjobs.remove(current_tjob)  # 選択した搬送ジョブをリストから削除
+                    self.cells[0].assign_tjob(current_tjob)  # 選択した搬送ジョブを割り付ける
                     logger.debug(f'Shuttle {self.aisle}-{self.floor} is assigned with Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
             elif current_tjob.progress == Progress.TO_FW_SHTL:  # 出庫ジョブの処理中なら
                 if self.cells[0].is_open():  # 空車なら
                     if self.cells[0].node.idx > current_tjob.bucket.home_store.row:  # 置場前に未到着なら
-                        yield env.timeout(env.MT_SHTL)  # 移動時間分の時間遅れ
+                        yield self.cells[0].hold(env.MT_SHTL)  # 移動時間分の時間遅れ
                         self.cells[0].move_down()  # 前のセルに移動
                     else:  # 置場前に到着済みなら
                         assert current_tjob.bucket.is_at_home(), 'Bucket is not in store'
-                        yield env.timeout(env.LT_SHTL)  # 積替え時間分の時間遅れ
+                        yield self.cells[0].hold(env.LT_SHTL)  # 積替え時間分の時間遅れ
                         current_tjob.bucket.cell.transfer()  # バケットを受け取る
                         logger.debug(f'Shuttle {self.aisle}-{self.floor} picks up at row {self.cells[0].node.idx} forward Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                 else:  # 運搬中なら
                     if self.cells[0].node.idx < env.ROW:  # 待機ノードに未到着なら
-                        yield env.timeout(env.MT_SHTL)  # 移動時間分の時間遅れ
+                        yield self.cells[0].hold(env.MT_SHTL)  # 移動時間分の時間遅れ
                         self.cells[0].move_up()  # 次のセルに移動
                     else:  # 待機ノードに到着済みなら
                         if self.is_blocked():  # 接続先コンベヤの先頭セルが埋まっているなら
                             yield self.nodes[-1].to.cell.bucket_sent
-                        yield env.timeout(env.LT_SHTL)  # 積替え時間分の時間遅れ
+                        yield self.cells[0].hold(env.LT_SHTL)  # 積替え時間分の時間遅れ
                         self.cells[0].transfer()  # バケットを送り出す
                         logger.debug(f'Shuttle {self.aisle}-{self.floor} drops forward Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                         current_tjob.proceed()  # 搬送ジョブの進捗を進める（TO_FW_SHTL > TO_FW_LIFT）
-                        current_tjob = None  # 実行中の搬送ジョブを削除
+                        self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除
             elif current_tjob.progress == Progress.TO_BW_SHTL:  # 入庫ジョブの処理中なら
                 if not self.cells[0].is_open():  # 運搬中なら
                     if self.cells[0].node.idx > current_tjob.bucket.home_store.row:  # 置場前に未到着なら
-                        yield env.timeout(env.MT_SHTL)  # 移動時間分の時間遅れ
+                        yield self.cells[0].hold(env.MT_SHTL)  # 移動時間分の時間遅れ
                         self.cells[0].move_down()  # 前のセルに移動
                     else:  # 置場前に到着済みなら
-                        yield env.timeout(env.LT_SHTL)  # 積替え時間分の時間遅れ
+                        yield self.cells[0].hold(env.LT_SHTL)  # 積替え時間分の時間遅れ
                         self.cells[0].transfer()  # バケットを送り出す
                         logger.debug(f'Shuttle {self.aisle}-{self.floor} drops at row {self.cells[0].node.idx} backward Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                 else:  # 空車なら
                     if self.cells[0].node.idx == env.ROW:  # 待機ノードにいる（出発前）なら
-                        yield env.timeout(env.LT_SHTL)  # 積込み時間分の時間遅れ
+                        yield self.cells[0].hold(env.LT_SHTL)  # 積込み時間分の時間遅れ
                         self.cells[0].node.ot.cell.transfer()  # バケットを受け取る
                         logger.debug(f'Shuttle {self.aisle}-{self.floor} picks up backward Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                     else:  # 待機ノードへの帰路にいるなら
-                        yield env.timeout(env.MT_SHTL)  # 移動時間分の時間遅れ
+                        yield self.cells[0].hold(env.MT_SHTL)  # 移動時間分の時間遅れ
                         self.cells[0].move_up()  # 前のセルに移動
                         if self.cells[0].node.idx == env.ROW:  # 待機ノードに帰還したなら
                             current_tjob.proceed()  # 搬送ジョブの進捗を進める（TO_BW_SHTL > DONE）
-                            current_tjob = None  # 実行中の搬送ジョブを削除
+                            self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除
             else:
                 raise RuntimeError(f'Shuttle job has inconsistent progress status: {current_tjob.progress}')
 
@@ -703,7 +738,7 @@ class Conveyor(Unit):  # コンベヤ（上流から順に stage = 0, 1, 2）
                 yield this_cell.bucket_receipt
             if not next_cell.is_open():  # 次のセルが埋まっていれば空くまで待つ
                 yield next_cell.bucket_sent
-            yield env.timeout(env.MT_CONV)  # 移動時間分の時間遅れ
+            yield this_cell.hold(env.MT_CONV)  # 移動時間分の時間遅れ
             this_cell.transfer()  # バケットを送り出す
             # 送出し先が末尾セルなら，搬送ジョブを次ユニットのジョブリストに追加
             if next_cell == self.cells[-1]:
@@ -738,9 +773,9 @@ class Lift(Unit):  # リフトユニット
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def operate(self, env: Simulation_Environment):  # リフトのプロセス関数
         controller = self.env.gtps.controller  # 制御器
-        current_tjob = None  # 実行中の搬送ジョブ
         if self.direction == Direction.FORWARD:  # 出庫リフト
             while True:
+                current_tjob = self.cells[0].assigned_tjob  # 実行中の搬送ジョブ
                 if current_tjob is None:  # 待機中なら
                     candidate_tjobs = self.precedence_filter(self.tjobs)  # 先行関係制約でフィルタリング
                     if len(candidate_tjobs) <= 0:  # 着手可能な搬送ジョブがなければ
@@ -749,30 +784,32 @@ class Lift(Unit):  # リフトユニット
                         current_tjob = controller.dispatch_lift(self, candidate_tjobs)  # 搬送ジョブのディスパッチング
                         assert current_tjob.progress == Progress.TO_FW_LIFT, 'Wrong progress at forward lift'
                         self.tjobs.remove(current_tjob)  # 選択した搬送ジョブをリストから削除
+                        self.cells[0].assign_tjob(current_tjob)  # 選択した搬送ジョブを割り付ける
                         logger.debug(f'Forward Lift {self.aisle} is assigned with Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                 else:  # 搬送ジョブの処理中なら
                     if self.cells[0].is_open():  # 空車なら
                         if self.cells[0].node.idx < current_tjob.bucket.home_store.floor:  # 階層に未到着なら
-                            yield env.timeout(env.MT_LIFT)  # 移動時間分の時間遅れ
+                            yield self.cells[0].hold(env.MT_LIFT)  # 移動時間分の時間遅れ
                             self.cells[0].move_up()  # 上階のセルに移動
                         else:  # 階層に到着したら
-                            yield env.timeout(env.LT_LIFT)  # 積替え時間分の時間遅れ
+                            yield self.cells[0].hold(env.LT_LIFT)  # 積替え時間分の時間遅れ
                             self.cells[0].node.ot.cell.transfer()  # バケットを受け取る
                             logger.debug(f'Forward Lift {self.aisle}-{self.direction} picks up on floor {current_tjob.bucket.home_store.floor} Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                     else:  # 運搬中なら
                         if self.cells[0].node.idx > 0:  # 0階に未到達なら
-                            yield env.timeout(env.MT_LIFT)  # 移動時間分の時間遅れ
+                            yield self.cells[0].hold(env.MT_LIFT)  # 移動時間分の時間遅れ
                             self.cells[0].move_down()  # 下階のセルに移動
                         else:  # 0階に到達したら
                             if not self.cells[0].node.to.cell.is_open():
                                 yield self.cells[0].node.to.cell.bucket_sent
-                            yield env.timeout(env.LT_LIFT)  # 積込み時間分の時間遅れ
+                            yield self.cells[0].hold(env.LT_LIFT)  # 積込み時間分の時間遅れ
                             self.cells[0].transfer()  # バケットを送り出す
                             logger.debug(f'Forward Lift {self.aisle}-{self.direction} drops Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                             current_tjob.proceed()  # 搬送ジョブの進捗を進める（TO_FW_LIFT > TO_FW_LOOP）
-                            current_tjob = None  # 実行中の搬送ジョブを削除
+                            self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除
         else:  # 入庫リフト
             while True:
+                current_tjob = self.cells[0].assigned_tjob  # 実行中の搬送ジョブ
                 if current_tjob is None:  # 待機中なら
                     if len(self.tjobs) <= 0:  # 着手可能な搬送ジョブがなければ
                         yield self.nodes[0].ot.cell.bucket_receipt
@@ -780,31 +817,32 @@ class Lift(Unit):  # リフトユニット
                         current_tjob = self.tjobs[0]  # （コンベヤの先頭にある）搬送ジョブの割付け
                         assert current_tjob.progress == Progress.TO_BW_LIFT, 'Wrong progress at backward lift'
                         self.tjobs.remove(current_tjob)  # 選択した搬送ジョブをリストから削除
+                        self.cells[0].assign_tjob(current_tjob)  # 選択した搬送ジョブを割り付ける
                         logger.debug(f'Backward Lift {self.aisle}-{self.direction} is assigned with Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                 else:  # 搬送ジョブの処理中なら
                     if self.cells[0].is_open():  # 空車なら
                         if self.cells[0].node.idx == 0:  # 0階にいるなら（出発前）
-                            yield env.timeout(env.LT_LIFT)  # 積替え時間分の時間遅れ
+                            yield self.cells[0].hold(env.LT_LIFT)  # 積替え時間分の時間遅れ
                             self.cells[0].node.ot.cell.transfer()  # バケットを受け取る
                             logger.debug(f'Backward Lift {self.aisle}-{self.direction} picks up Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                         else:  # 0階への帰路にいるなら
-                            yield env.timeout(env.MT_LIFT)  # 移動時間分の時間遅れ
+                            yield self.cells[0].hold(env.MT_LIFT)  # 移動時間分の時間遅れ
                             self.cells[0].move_down()  # 下階のセルに移動
                             if self.cells[0].node.idx == 0:  # 0階に帰還したなら
-                                current_tjob = None  # 実行中の搬送ジョブを削除（0階に帰還してから削除する）
+                                self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除（0階に帰還してから削除する）
                     else:  # 運搬中なら
                         if self.cells[0].node.idx < current_tjob.bucket.home_store.floor:  # 階層に未到達なら
-                            yield env.timeout(env.MT_LIFT)  # 移動時間分の時間遅れ
+                            yield self.cells[0].hold(env.MT_LIFT)  # 移動時間分の時間遅れ
                             self.cells[0].move_up()  # 上階のセルに移動
                         else:  # 階層に到達したら
                             if not self.cells[0].node.to.cell.is_open():
                                 yield self.cells[0].node.to.cell.bucket_sent
-                            yield env.timeout(env.LT_LIFT)  # 積込み時間分の時間遅れ
+                            yield self.cells[0].hold(env.LT_LIFT)  # 積込み時間分の時間遅れ
                             self.cells[0].transfer()  # バケットを送り出す
                             logger.debug(f'Backward Lift {self.aisle}-{self.direction} drops on floor {current_tjob.bucket.home_store.floor} Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
                             current_tjob.proceed()  # 搬送ジョブの進捗を進める（TO_BW_LIFT > TO_BW_SHTL）
                             if self.cells[0].node.idx == 0:  # 0階が目的階層だった場合の例外処理
-                                current_tjob = None  # 実行中の搬送ジョブを削除
+                                self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 class Loop(Unit):  # ループユニット
@@ -842,7 +880,7 @@ class Loop(Unit):  # ループユニット
     def operate(self, env: Simulation_Environment):  # 搬送ジョブの台車への割付け
         controller = self.env.gtps.controller  # 制御器
         while True:
-            free_cars = [car for car in self.cells if car.tjob is None]  # 搬送ジョブ未割付けの台車
+            free_cars = [car for car in self.cells if car.assigned_tjob is None]  # 搬送ジョブ未割付けの台車
             if len(self.tjobs) > 0 and len(free_cars) > 0:  # どちらも存在するなら
                 fw_tjobs = [tjob for tjob in self.tjobs if tjob.progress == Progress.TO_FW_LOOP]  # 出庫ジョブリスト
                 fw_tjobs = self.precedence_filter(fw_tjobs)  # 先行関係制約でフィルタリング
@@ -878,15 +916,15 @@ class Loop(Unit):  # ループユニット
             car_ahead.pushed.succeed()
             car_ahead.pushed = env.event()
             yield next_node.unblocked  # ノード解放イベントを待ち受け
-        yield env.timeout(env.MT_LOOP)  # 移動時間分の時間遅れ
+        yield this_car.hold(env.MT_LOOP)  # 移動時間分の時間遅れ
         this_car.move_to(next_node)
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def handle_failure(self, env: Simulation_Environment, vehicle: int, failure_count: int):  # 荷卸し失敗の処理プロセス
-        if failure_count > env.REPEATABLE:
-            this_car = self.cells[vehicle]
-            this_car.tjob.retry_needed = True
-            this_car.tjob.proceed(Progress.ON_BW_LOOP)  # 進捗を出庫側から入庫側に変更
-            this_car.assign_goal(self.nodes[this_car.tjob.get_goal_node_idx()])  # 行き先を更新
+    def handle_failure(self, env: Simulation_Environment, vehicle: int):  # 荷卸し失敗の処理プロセス
+        this_car = self.cells[vehicle]
+        if this_car.assigned_tjob.failure_count > env.REPEATABLE:
+            this_car.assigned_tjob.retry_needed = True
+            this_car.assigned_tjob.proceed(Progress.ON_BW_LOOP)  # 進捗を出庫側から入庫側に変更
+            this_car.assign_goal(self.nodes[this_car.assigned_tjob.get_goal_node_idx()])  # 行き先を更新
         else:
             yield env.process(self.move_ahead(env, vehicle))  # 前進プロセスを駆動
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
@@ -894,9 +932,8 @@ class Loop(Unit):  # ループユニット
         this_car = self.cells[vehicle]
         car_ahead = self.cells[(vehicle -1 +self.env.VEHICLE) %self.env.VEHICLE]  # 先行台車
         car_behind = self.cells[(vehicle +1) %self.env.VEHICLE]  # 後続台車
-        failure_count = 0  # 荷卸し失敗回数
         while True:
-            if this_car.tjob is None:  # 搬送ジョブが割り付けられていないなら
+            if this_car.assigned_tjob is None:  # 搬送ジョブが割り付けられていないなら
                 if this_car.goal is None:  # 行き先が未定で停止中（待機状態）
                     pushed = this_car.pushed
                     goal_assigned = this_car.goal_assigned
@@ -912,39 +949,39 @@ class Loop(Unit):  # ループユニット
                 if this_car.goal != this_car.node:  # 行き先への移動の途上なら
                     yield env.process(self.move_ahead(env, vehicle))  # 前進プロセスを駆動
                 else:  # 行き先に到着したら
-                    if this_car.tjob.progress in [Progress.TO_FW_LOOP, Progress.TO_BW_LOOP]:  # 荷積み前
-                        yield env.timeout(env.LT_LOOP)  # 積込み時間分の時間遅れ
+                    if this_car.assigned_tjob.progress in [Progress.TO_FW_LOOP, Progress.TO_BW_LOOP]:  # 荷積み前
+                        yield this_car.hold(env.LT_LOOP)  # 積込み時間分の時間遅れ
                         this_car.node.ot.cell.transfer()  # バケットを受け取る
-                        logger.debug(f'Car {this_car.idx} picks up at cell {this_car.node.idx} {'forward' if this_car.tjob.progress == Progress.TO_FW_LOOP else 'backward'} Tjob {this_car.tjob.pjob.idx}-{this_car.tjob.idx} at {env.now:.2f}')
-                        this_car.tjob.proceed()  # 搬送ジョブの進捗を進める
-                        this_car.assign_goal(self.nodes[this_car.tjob.get_goal_node_idx()])  # 行き先を更新
-                    elif this_car.tjob.progress in [Progress.ON_FW_LOOP, Progress.ON_BW_LOOP]:  # 荷降ろし前
-                        if this_car.tjob.progress == Progress.ON_FW_LOOP and this_car.tjob.late_preceding_tjob_count() > 0:  # 先行関係制約が満たされていないなら（まだ降ろせない）
-                            failure_count += 1  # 荷降し失敗回数を増やす
-                            logger.debug(f'Car {this_car.idx} fails at cell {this_car.node.idx} and starts to retry Tjob {this_car.tjob.pjob.idx}-{this_car.tjob.idx} at {env.now:.2f}')
-                            yield env.process(self.handle_failure(env, vehicle, failure_count))
+                        logger.debug(f'Car {this_car.idx} picks up at cell {this_car.node.idx} {'forward' if this_car.assigned_tjob.progress == Progress.TO_FW_LOOP else 'backward'} Tjob {this_car.assigned_tjob.pjob.idx}-{this_car.assigned_tjob.idx} at {env.now:.2f}')
+                        this_car.assigned_tjob.proceed()  # 搬送ジョブの進捗を進める
+                        this_car.assign_goal(self.nodes[this_car.assigned_tjob.get_goal_node_idx()])  # 行き先を更新
+                    elif this_car.assigned_tjob.progress in [Progress.ON_FW_LOOP, Progress.ON_BW_LOOP]:  # 荷降ろし前
+                        if this_car.assigned_tjob.progress == Progress.ON_FW_LOOP and this_car.assigned_tjob.late_preceding_tjob_count() > 0:  # 先行関係制約が満たされていないなら（まだ降ろせない）
+                            this_car.assigned_tjob.failure_count += 1  # 荷降し失敗回数を増やす
+                            this_car.assigned_tjob.stamp('fail', dst=this_car)  # 履歴に記録
+                            logger.debug(f'Car {this_car.idx} fails at cell {this_car.node.idx} and starts to retry Tjob {this_car.assigned_tjob.pjob.idx}-{this_car.assigned_tjob.idx} at {env.now:.2f}')
+                            yield env.process(self.handle_failure(env, vehicle))
                         else:  # 先行関係チェックOK
                             if not this_car.node.to.cell.is_open():  # 荷降ろしがブロックされたら
                                 result = yield (pushed | this_car.node.to.cell.bucket_sent)
                                 if pushed in result:  # 後続台車にプッシュされたら
                                     yield env.process(self.move_ahead(env, vehicle))  # 前進プロセスを駆動
-                                    logger.debug(f'Car {this_car.idx} is pushed out from cell {this_car.node.idx} with Tjob {this_car.tjob.pjob.idx}-{this_car.tjob.idx} at {env.now:.2f}')
+                                    logger.debug(f'Car {this_car.idx} is pushed out from cell {this_car.node.idx} with Tjob {this_car.assigned_tjob.pjob.idx}-{this_car.assigned_tjob.idx} at {env.now:.2f}')
                             else:
-                                yield env.timeout(env.LT_LOOP)  # 積込み時間分の時間遅れ
+                                yield this_car.hold(env.LT_LOOP)  # 積込み時間分の時間遅れ
                                 this_car.transfer()  # バケットを送り出す
-                                logger.debug(f'Car {this_car.idx} drops at cell {this_car.node.idx} {'forward' if this_car.tjob.progress == Progress.ON_FW_LOOP else 'backward'} Tjob {this_car.tjob.pjob.idx}-{this_car.tjob.idx} at {env.now:.2f}')
-                                failure_count = 0  # 荷降し失敗回数を0に戻す
-                                this_car.tjob.proceed()  # 搬送ジョブの進捗を進める
+                                logger.debug(f'Car {this_car.idx} drops at cell {this_car.node.idx} {'forward' if this_car.assigned_tjob.progress == Progress.ON_FW_LOOP else 'backward'} Tjob {this_car.assigned_tjob.pjob.idx}-{this_car.assigned_tjob.idx} at {env.now:.2f}')
+                                this_car.assigned_tjob.proceed()  # 搬送ジョブの進捗を進める
                                 this_car.tjob_completed.succeed()  # 搬送ジョブ完了イベントの発火
                                 this_car.tjob_completed = env.event()
-                                this_car.tjob = None  # 搬送ジョブを削除
+                                this_car.release_tjob()  # 搬送ジョブを削除
                                 if this_car.is_pushed:  # 後続台車をブロックしていたら
                                     escape_node = self.get_escape_node(car_behind)
                                     this_car.assign_goal(escape_node)
                                 else:
                                     this_car.goal = None  # 待機状態に戻る
                     else:
-                        raise RuntimeError(f'Loop job has inconsistent progress status: {this_car.tjob.progress}')
+                        raise RuntimeError(f'Loop job has inconsistent progress status: {this_car.assigned_tjob.progress}')
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 class Station(Unit):  # 作業場ユニット
@@ -976,23 +1013,24 @@ class Station(Unit):  # 作業場ユニット
         return work_time
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def operate(self, env: Simulation_Environment):  # ピッキング作業場のプロセス関数
-        current_tjob = None  # 実行中の搬送ジョブ
         while True:
+            current_tjob = self.cells[0].assigned_tjob  # 実行中の搬送ジョブ
             if current_tjob is None:  # 待機中なら
                 if len(self.tjobs) <= 0:  # 着手可能な搬送ジョブがなければ
                     yield self.cells[0].node.ot.cell.bucket_receipt
                 else:
                     current_tjob = self.tjobs[0]  # 入口コンベヤの先頭ジョブを選択し
                     self.tjobs.remove(current_tjob)  # それをリストから削除
+                    self.cells[0].assign_tjob(current_tjob)  # 選択した搬送ジョブを割り付ける
                     assert current_tjob.progress == Progress.TO_PICKED, 'Wrong progress at station'
                     assert current_tjob.late_preceding_tjob_count() <= 0, 'Wrong picking order'
             else:  # 搬送ジョブが割り付けられているなら
                 if self.cells[0].is_open():  # 作業場が空いているなら
-                    yield env.timeout(env.MT_CONV)  # 移動時間分の時間遅れ
+                    yield self.cells[0].hold(env.MT_CONV)  # 移動時間分の時間遅れ
                     self.cells[0].node.ot.cell.transfer()  # バケットを受け取る
                 else:  # 作業場にバケットがあるなら
                     work_time = self.get_work_time()  # ピッキング作業時間を取得
-                    yield env.timeout(work_time)
+                    yield self.cells[0].hold(work_time)
                     # 搬送ジョブの進捗を進め（TO_PICKED -> TO_BW_LOOP），作業時間を記録
                     current_tjob.proceed(work_time=work_time)
                     logger.debug(f'Station {self.picker} completed processing Tjob {current_tjob.pjob.idx}-{current_tjob.idx} at {env.now:.2f}')
@@ -1000,9 +1038,9 @@ class Station(Unit):  # 作業場ユニット
                     if return_needed:  # バケットがまだ空でなければ入庫ジョブに進む
                         if not self.cells[0].node.to.cell.is_open():  # 出口コンベヤが埋まっているなら
                             yield self.cells[0].node.to.cell.bucket_sent  # それが空くのを待ち受ける
-                        yield env.timeout(env.MT_CONV)  # 移動時間分の時間遅れ
+                        yield self.cells[0].hold(env.MT_CONV)  # 移動時間分の時間遅れ
                         self.cells[0].transfer()  # バケットを送り出す
-                    current_tjob = None  # 実行中の搬送ジョブを削除
+                    self.cells[0].release_tjob()  # 実行中の搬送ジョブを削除
                     self.makespan = env.now  # メイクスパンに現在時刻を登録
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----

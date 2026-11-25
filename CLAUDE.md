@@ -53,7 +53,10 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブ
 
 `TJobGraph(gtps).update()` が，システム内の TJob をノードとしてピッキング可能順序を表す `networkx.MultiDiGraph` を返す．`models.py` の状態を読むだけで書き換えず，`models.py` からは参照しない（コントローラ側から使う）．仕様は `docs/tjob_graph.md`．
 
-### オンライングラフの参照実装（`gtp/operation_graph.py`）
+### 縮約グラフ（`gtp/block_graph.py`）と，その参照実装（`gtp/operation_graph.py`・`gtp/reduction.py`）
+
+`BlockGraph(gtps, length='L0' または 'L3')` が，状態から縮約グラフの項を直接作る（`tables` を使い回すと速い）．参照実装 `Reduction(OnlineGraph(gtps))` と項が一致することをテストで確かめている．状態の読み取りは `gtp/state.py` の `StateReader` を両方で共有する．仕様は `docs/tjob_graph.md`．
+
 
 `OnlineGraph(gtps)` が，時刻 t の状態から作業レベルのオンライングラフを作る．`models.py` の状態を読むだけで，速さは問わない検証用の実装．仕様は `docs/operation_graph.md`．実行中のピッキングの残り時間は，既定では期待値（`known_pick=True` は検証専用で，実現値を先読みする）．
 

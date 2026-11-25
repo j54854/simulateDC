@@ -96,7 +96,7 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 
 - **処理中ジョブは `assigned_tjob` で読む**：迎車中（バケットはまだ前のセルにある）や復帰中（入庫シャトル・入庫リフトの帰還中）も設定されている．「割付け済みで処理中」と「待ち行列で待機中」は，`assigned_tjob` と `unit.tjobs` で区別できる
 - **DONE と置場への格納はずれる**：入庫時は，バケットが置場に格納された後，シャトルが待機ノードへ戻るまで `TO_BW_SHTL` のまま
-- **`TO_FW_SHTL` の待ちは2種類**：1つのバケットに複数の搬送ジョブが割り付けられることがあり，`bucket.current_tjob()` でないジョブはバケットの帰還を待っている．着手可能でも先行関係制約（`Unit.precedence_filter()`）で後回しにされることがある
+- **`TO_FW_SHTL` の待ちは2種類**：1つのバケットに複数の搬送ジョブが割り付けられることがあり，`bucket.current_tjob()` でないジョブはバケットの帰還を待っている．着手可能でも先行関係制約（`DefaultController.precedence_filter()`．使うかどうかは方策による）で後回しにされることがある
 - **再搬送では同じ TJob が経路を2周以上する**：`retry_needed == True` の間（`ON_BW_LOOP` 〜 `TO_BW_SHTL`）はピッキングせずに置場へ戻る途中．`picked_time` は `None` のままで，`unpicked_tjobs` にも残る．回数は `retry_count` に記録される
 - **空になったバケット**：ピッキングでバケットが空になると，入庫経路を通らず即座に置場へ戻され（新バケット扱い），`bucket.tjobs` はクリアされる．`tjob.bucket` の参照は残る
 - **入庫リフトの参照**：入庫リフトは荷卸し後，0階へ戻るまで（既に `TO_BW_SHTL` になった）ジョブを `assigned_tjob` に保持し続ける（復帰中の占有）
@@ -111,7 +111,7 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 各ユニットの時間遅れ（`env.timeout`）は，すべて作業の主体のセルの `Cell.hold(delay)` を通す．`hold` は開始時刻 `hold_start` と終了時刻 `hold_end` を記録してから `env.timeout(delay)` を返す．主体のセルは，シャトル・リフト・作業場では `unit.cells[0]`，コンベヤでは送り出すセル，ループでは台車である．
 
 - 実行中の作業の残り時間は `max(0, cell.hold_end - env.now)` で読める．`hold_end < env.now` なら，そのセルは作業をしておらず，待っている（または待機中）
-- ピッキング中は，作業場のセルの `hold_end` が実現値のピッキング終了時刻になる
+- ピッキング中は，作業場のセルの `hold_end` が実現値のピッキング終了時刻になる（実用時にはわからない情報なので，検証以外には使わない）
 
 ### 荷卸し失敗の回数（`tjob.failure_count`）
 

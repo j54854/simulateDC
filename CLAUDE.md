@@ -53,6 +53,12 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブ
 
 `TJobGraph(gtps).update()` が，システム内の TJob をノードとしてピッキング可能順序を表す `networkx.MultiDiGraph` を返す．`models.py` の状態を読むだけで書き換えず，`models.py` からは参照しない（コントローラ側から使う）．仕様は `docs/tjob_graph.md`．
 
+### オンライングラフの参照実装（`gtp/operation_graph.py`）
+
+`OnlineGraph(gtps)` が，時刻 t の状態から作業レベルのオンライングラフを作る．`models.py` の状態を読むだけで，速さは問わない検証用の実装．仕様は `docs/operation_graph.md`．実行中のピッキングの残り時間は，既定では期待値（`known_pick=True` は検証専用で，実現値を先読みする）．
+
+`gtp/reduction.py` の `Reduction(online)` が，それを機械的に縮約する（`ports` でポートの有無，`length` で L0・L3 を切り替える）．実績との比較は `examples/measure_reduction.py`（全条件で約24分かかる）．仕様は `docs/tjob_graph.md`．
+
 ## 注意点
 
 - **乱数はグローバルな `random` モジュールを共有**している（ジョブ生成・作業時間・バケット配置・デフォルトコントローラ）．`random` の呼び出し順・回数を変えると結果が変わる

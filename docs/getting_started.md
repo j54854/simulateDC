@@ -99,7 +99,8 @@ from gtp import DefaultController, Progress
 class MyController(DefaultController):
 
     def dispatch_shuttle(self, shuttle, candidate_tjobs):
-        # エシェロン在庫の少ない作業場を優先する例
+        # 先行関係を満たしやすいジョブに絞り，エシェロン在庫の少ない作業場を優先する例
+        candidate_tjobs = self.precedence_filter(candidate_tjobs)
         candidate_tjobs = self.echelon_filter(candidate_tjobs, Progress.TO_FW_LIFT)
         return candidate_tjobs[0]
 

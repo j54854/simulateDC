@@ -14,6 +14,8 @@ class MyController(DefaultController):
         return next_pjob, next_picker
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def dispatch_shuttle(self, shuttle, candidate_tjobs):
+        # 先行関係制約でフィルタリング
+        candidate_tjobs = self.precedence_filter(candidate_tjobs)
         # 搬送ジョブのエシェロン在庫が少ない作業場を優先
         candidate_tjobs = self.echelon_filter(candidate_tjobs, Progress.TO_FW_LIFT)
         # ピッキングジョブのインデックスが最小のものだけに絞る
@@ -22,6 +24,8 @@ class MyController(DefaultController):
         return random.choice(candidate_tjobs)
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def dispatch_lift(self, lift, candidate_tjobs):
+        # 先行関係制約でフィルタリング
+        candidate_tjobs = self.precedence_filter(candidate_tjobs)
         # 搬送ジョブのエシェロン在庫が少ない作業場を優先
         candidate_tjobs = self.echelon_filter(candidate_tjobs, Progress.TO_FW_LOOP)
         # ピッキングジョブのインデックスが最小のものだけに絞る
@@ -30,6 +34,7 @@ class MyController(DefaultController):
         return random.choice(candidate_tjobs)
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def dispatch_loop(self, loop, candidate_fw_tjobs):
+        candidate_fw_tjobs = self.precedence_filter(candidate_fw_tjobs)  # 先行関係制約でフィルタリング
         candidate_fw_tjobs = self.echelon_filter(candidate_fw_tjobs, Progress.ON_FW_LOOP)
         for tjob in loop.tjobs:  # 入出庫両方の搬送ジョブリストを到着順に前から順に見ていく
             if tjob.progress == Progress.TO_BW_LOOP:  # 入庫ジョブなら

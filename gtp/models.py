@@ -137,6 +137,26 @@ class DefaultController:
                 return filtered_tjobs  # それを返す
         return []  # 全て空なら，空リストを返す
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def precedence_filter(self, tjobs: list[TJob]) -> list[TJob]:
+        """サブクラスで利用可能なユーティリティ: 遅れている先行搬送ジョブ数が最小のジョブに絞る。
+
+        ソフトな先行関係制約（作業場の順序制約を満たしやすいジョブを優先する）で，使うかどうかは方策が選べる。
+        並びは保たれ，空でないリストを渡せば，結果も空にならない。
+
+        Args:
+            tjobs: 絞り込み対象の搬送ジョブリスト。
+
+        Returns:
+            遅れている先行搬送ジョブ数が最小の搬送ジョブのリスト（空リストを渡した場合は空リスト）。
+        """
+        if len(tjobs) <= 0:  # 空リストが渡されたら
+            return []  # 空リストを返す
+        # 遅れている先行搬送ジョブ数の最小値
+        min_late_count = min([tjob.late_preceding_tjob_count() for tjob in tjobs])
+        # 遅れている先行搬送ジョブ数が最小のものだけに絞る
+        filtered_tjobs = [tjob for tjob in tjobs if tjob.late_preceding_tjob_count() <= min_late_count]
+        return filtered_tjobs
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     def dispatch_pjobs(self, waiting_pjobs: list[PJob], last_picker: int) -> tuple[PJob, int]:
         """次に投入するピッキングジョブと作業場番号を決定する。
 
@@ -159,11 +179,13 @@ class DefaultController:
             shuttle: ジョブを割り当てるシャトルユニット。
                 shuttle.aisle（系列番号）・shuttle.floor（階層番号）を参照可。
             candidate_tjobs: 割り当て候補の搬送ジョブリスト（progress == TO_FW_SHTL）。
+                着手可能なものすべてで，先行関係による絞り込みはされていない（precedence_filter を参照）。
                 空にはならない（空の場合は本メソッドは呼ばれない）。
 
         Returns:
             candidate_tjobs から選択した1件の搬送ジョブ。
         """
+        candidate_tjobs = self.precedence_filter(candidate_tjobs)  # 先行関係制約でフィルタリング
         # ピッキングジョブのインデックスが最小のものだけに絞る
         pjob_idx = [tjob.pjob.idx for tjob in candidate_tjobs]
         candidate_tjobs = [tjob for tjob in candidate_tjobs if tjob.pjob.idx == min(pjob_idx)]
@@ -176,11 +198,13 @@ class DefaultController:
             lift: ジョブを割り当てるリフトユニット。
                 lift.aisle（系列番号）を参照可。
             candidate_tjobs: 割り当て候補の搬送ジョブリスト（progress == TO_FW_LIFT）。
+                着手可能なものすべてで，先行関係による絞り込みはされていない（precedence_filter を参照）。
                 空にはならない（空の場合は本メソッドは呼ばれない）。
 
         Returns:
             candidate_tjobs から選択した1件の搬送ジョブ。
         """
+        candidate_tjobs = self.precedence_filter(candidate_tjobs)  # 先行関係制約でフィルタリング
         # ピッキングジョブのインデックスが最小のものだけに絞る
         pjob_idx = [tjob.pjob.idx for tjob in candidate_tjobs]
         candidate_tjobs = [tjob for tjob in candidate_tjobs if tjob.pjob.idx == min(pjob_idx)]
@@ -197,6 +221,8 @@ class DefaultController:
             loop: ジョブを割り当てるループユニット。
                 loop.tjobs（入庫・出庫混合の待機ジョブリスト，到着順）を参照可。
             candidate_fw_tjobs: 出庫方向の割り当て候補搬送ジョブリスト（progress == TO_FW_LOOP）。
+                着手可能なものすべてで，先行関係による絞り込みはされていない（precedence_filter を参照）。
+                出庫ジョブがなければ空になる。
 
         Returns:
             loop.tjobs または candidate_fw_tjobs から選択した1件の搬送ジョブ。
@@ -204,6 +230,7 @@ class DefaultController:
         Raises:
             RuntimeError: 割り当て可能なジョブが見つからない場合（通常は発生しない）。
         """
+        candidate_fw_tjobs = self.precedence_filter(candidate_fw_tjobs)  # 先行関係制約でフィルタリング
         for tjob in loop.tjobs:  # 入出庫両方の搬送ジョブリストを到着順に前から順に見ていく
             if tjob.progress == Progress.TO_BW_LOOP:  # 入庫ジョブなら
                 return tjob  # それを実行
@@ -589,15 +616,6 @@ class Unit:  # GTPシステムを構成するユニットの抽象クラス
             return True
         else:  # 受取り側のセルが埋まっているかどうか
             return not self.nodes[-1].to.cell.is_open()
-# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def precedence_filter(self, tjobs: list[TJob]) -> list[TJob]:  # ソフトな先行関係制約
-        if len(tjobs) <= 0:  # 空リストが渡されたら
-            return []  # 空リストを返す
-        # 遅れている先行搬送ジョブ数の最小値
-        min_late_count = min([tjob.late_preceding_tjob_count() for tjob in tjobs])
-        # 遅れている先行搬送ジョブ数が最小のものだけに絞る
-        filtered_tjobs = [tjob for tjob in tjobs if tjob.late_preceding_tjob_count() <= min_late_count]
-        return filtered_tjobs
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 class Store(Unit):  # 置場ユニット
@@ -659,7 +677,6 @@ class Shuttle(Unit):  # シャトルユニット
                     and tjob.bucket.is_at_home()  # バケットが置場にある
                     and tjob == tjob.bucket.current_tjob()  # そのバケットの次にやるべき搬送ジョブである
                     ]
-                fw_tjobs = self.precedence_filter(fw_tjobs)  # 先行関係制約でフィルタリング
                 bw_tjobs = [  # 入庫ジョブリスト
                     tjob for tjob in self.tjobs if tjob.progress == Progress.TO_BW_SHTL
                     ]
@@ -796,7 +813,7 @@ class Lift(Unit):  # リフトユニット
             while True:
                 current_tjob = self.cells[0].assigned_tjob  # 実行中の搬送ジョブ
                 if current_tjob is None:  # 待機中なら
-                    candidate_tjobs = self.precedence_filter(self.tjobs)  # 先行関係制約でフィルタリング
+                    candidate_tjobs = list(self.tjobs)  # 着手可能な搬送ジョブリスト（待ち行列そのものは渡さない）
                     if len(candidate_tjobs) <= 0:  # 着手可能な搬送ジョブがなければ
                         yield env.any_of([self.nodes[floor].ot.cell.bucket_receipt for floor in range(env.FLOOR)])
                     else:
@@ -902,7 +919,6 @@ class Loop(Unit):  # ループユニット
             free_cars = [car for car in self.cells if car.assigned_tjob is None]  # 搬送ジョブ未割付けの台車
             if len(self.tjobs) > 0 and len(free_cars) > 0:  # どちらも存在するなら
                 fw_tjobs = [tjob for tjob in self.tjobs if tjob.progress == Progress.TO_FW_LOOP]  # 出庫ジョブリスト
-                fw_tjobs = self.precedence_filter(fw_tjobs)  # 先行関係制約でフィルタリング
                 current_tjob = controller.dispatch_loop(self, fw_tjobs)  # 搬送ジョブのディスパッチング
                 if len(free_cars) == 1:  # 空き台車が1台ならそれを選ぶ
                     the_car = free_cars[0]
@@ -956,8 +972,8 @@ class Loop(Unit):  # ループユニット
                 if this_car.goal is None:  # 行き先が未定で停止中（待機状態）
                     pushed = this_car.pushed  # 現時点の押出しイベント（発火時に差し替えられるので，待つ直前に受け直す）
                     goal_assigned = this_car.goal_assigned  # 現時点の行き先ノード設定イベント（発火時に差し替えられるので，待つ直前に受け直す）
-                    result = yield (goal_assigned | pushed)  # 行き先が割り付けられるまで待機
-                    if not goal_assigned in result:  # 搬送ジョブは割り当てられず，後続台車にプッシュされたら
+                    yield (goal_assigned | pushed)  # 行き先が割り付けられるか，後続台車にプッシュされるまで待機
+                    if this_car.assigned_tjob is None:  # 搬送ジョブは割り当てられず，後続台車にプッシュされたら（同時刻の割付けは待ちの結果に入らないことがあるので，状態で判定する）
                         escape_node = self.get_escape_node(car_behind)
                         this_car.assign_goal(escape_node)
                 elif this_car.goal != this_car.node:  # （後続台車にプッシュされ）退避の途上なら
@@ -983,8 +999,8 @@ class Loop(Unit):  # ループユニット
                         else:  # 先行関係チェックOK
                             if not this_car.node.to.cell.is_open():  # 荷降ろしがブロックされたら
                                 pushed = this_car.pushed  # 現時点の押出しイベント（発火時に差し替えられるので，待つ直前に受け直す）
-                                result = yield (pushed | this_car.node.to.cell.bucket_sent)
-                                if pushed in result:  # 後続台車にプッシュされたら
+                                yield (pushed | this_car.node.to.cell.bucket_sent)
+                                if this_car.is_pushed and not this_car.node.to.cell.is_open():  # 後続台車にプッシュされ，まだ降ろせないなら（待ちの結果ではなく状態で判定する）
                                     yield env.process(self.move_ahead(env, vehicle))  # 前進プロセスを駆動
                                     logger.debug(f'Car {this_car.idx} is pushed out from cell {this_car.node.idx} with Tjob {this_car.assigned_tjob.pjob.idx}-{this_car.assigned_tjob.idx} at {env.now:.2f}')
                             else:

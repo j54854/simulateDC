@@ -60,7 +60,11 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブ
 
 `OnlineGraph(gtps)` が，時刻 t の状態から作業レベルのオンライングラフを作る．`models.py` の状態を読むだけで，速さは問わない検証用の実装．仕様は `docs/operation_graph.md`．実行中のピッキングの残り時間は，既定では期待値（`known_pick=True` は検証専用で，実現値を先読みする）．
 
-`gtp/reduction.py` の `Reduction(online)` が，それを機械的に縮約する（`ports` でポートの有無，`length` で L0・L3 を切り替える）．実績との比較は `examples/measure_reduction.py`（全条件で約24分かかる）．仕様は `docs/tjob_graph.md`．
+`gtp/reduction.py` の `Reduction(online)` が，それを機械的に縮約する（`ports` でポートの有無，`length` で L0・L3 を切り替える）．実績との比較は `examples/measure_reduction.py`（全条件で約31分かかる）．仕様は `docs/tjob_graph.md`．
+
+### 縮約グラフの評価（`gtp/evaluation.py`，名前は仮）
+
+`Evaluation(BlockGraph(gtps))` が，時刻の小さい順にノードを確定する最長経路で各ノードの時刻を求め，作業場の順が未確定の TJob を作業場の列に並べる（直列化．段階 E1）．`serialize=False` なら扇のままの最長経路で，参照実装の `Reduction.times()` と一致する．出力は作業場ごとの列（`orders`）と P のベクトル（`picks`）など．仕様と結果は `docs/tjob_graph.md` の「評価（直列化）の段階」．作業場の列での位置・スロットごとの精度は `examples/measure_evaluation.py`（全条件で約30秒）で測る．
 
 ## 注意点
 

@@ -1,7 +1,7 @@
 """オンライングラフと縮約グラフの時刻を，実績と比べる（参照実装の段階4）
 
 一定間隔でグラフを作り，各 TJob のブロックの開始とポートの時刻を，完走後の履歴と比較する．
-周回の規則と直列化は使わない（最長経路だけで計算する）．
+周回の規則は使わない．L0s・L3s は作業場の直列化（評価 E1，gtp/evaluation.py）を使い，それ以外は最長経路だけで計算する．
 """
 import argparse
 import csv
@@ -11,6 +11,8 @@ import time
 from collections import Counter, defaultdict
 import networkx as nx
 from gtp import create_simulator
+from gtp.block_graph import BlockGraph
+from gtp.evaluation import Evaluation
 from gtp.models import Conveyor, Direction, Loop, Progress, Shuttle, Station
 from gtp.operation_graph import START, OnlineGraph
 from gtp.reduction import Reduction
@@ -47,19 +49,23 @@ def online_times(online):  # オンライングラフの最早開始時刻
     return starts
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-def predict(online, models):  # モデル -> {(TJob, 比べる時刻): 見積り}
+def predict(online, models, evaluations=None):  # モデル -> {(TJob, 比べる時刻): 見積り}
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    # evaluations: 直列化のモデル -> 評価（同じ時点の状態から作ったもの）
     targets = {(tjob, name): target for tjob, chain in online.chains.items() if chain
         for name, target in target_ops(chain).items()}
     result = {}
     if 'online' in models:
         starts = online_times(online)
         result['online'] = {key: starts[op.key] +(op.duration if at_end else 0) for key, (op, at_end) in targets.items()}
-    for model, ports, length in (('L0', False, 'L0'), ('L0p', True, 'L0'), ('L3p', True, 'L3')):
+    for model, ports, length in (('L0', False, 'L0'), ('L0p', True, 'L0'), ('L3p', True, 'L3'), ('L0s', True, 'L0'), ('L3s', True, 'L3')):
         if model not in models:
             continue
-        reduction = Reduction(online, ports, length)
-        times = reduction.times()
+        reduction = Reduction(online, ports, length)  # ブロックの対応づけ（キーは直接構築と同じ）
+        if model.endswith('s'):  # 評価の時刻は開始ノードを0とする相対時刻
+            times = {node: time +(online.now if length == 'L0' else 0) for node, time in evaluations[model].times.items()}
+        else:
+            times = reduction.times()
         values = {}
         for key, (op, at_end) in targets.items():
             block = reduction.block_of[op.key]
@@ -72,6 +78,22 @@ def predict(online, models):  # モデル -> {(TJob, 比べる時刻): 見積り
             values[key] = value if length == 'L0' else online.now +value *reduction.unit
         result[model] = values
     return result
+
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+def evaluate(gtps):  # 直列化のモデル -> 評価と，未確定の最初の1台の P が直列化前と違う作業場の数
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    evaluations, differs = {}, Counter()
+    for length in ('L0', 'L3'):
+        graph = BlockGraph(gtps, length=length)
+        evaluation = Evaluation(graph)
+        plain = Evaluation(graph, serialize=False).times
+        for picker, (confirmed, others) in graph.station_lists.items():
+            if others:
+                first = graph.block_of[evaluation.orders[picker][len(confirmed)], 'work'].port_key('P')
+                differs[length, 'stations'] += 1
+                differs[length, 'first_differs'] += abs(evaluation.times[first] -plain[first]) > 1e-9
+        evaluations[length +'s'] = evaluation
+    return evaluations, differs
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 def actual_times(tjob, n_history, env):  # 比べる時刻の実績
@@ -115,13 +137,19 @@ def bottleneck_sides(online, length):  # TJob -> Pを決めるのが作業場側
 def run_condition(params, interval):  # 1条件の実行（誤差のリストと，判定の集計を返す）
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
     env = create_simulator(params=params)
-    snapshots, sides = [], Counter()
+    snapshots, sides, orders, differs = [], Counter(), [], Counter()
 
     def monitor(env):
         while True:
             yield env.timeout(interval)
             expected = OnlineGraph(env.gtps)
-            predicted = predict(expected, ('online', 'L0', 'L0p', 'L3p'))
+            evaluations, differ = evaluate(env.gtps)
+            differs.update(differ)
+            for model, evaluation in evaluations.items():  # 作業場の列（未確定の部分と，その直前の1台）
+                for picker, (confirmed, _) in evaluation.graph.station_lists.items():
+                    order = evaluation.orders[picker][max(len(confirmed) -1, 0):]
+                    orders.append((model, order, {tjob: len(tjob.history) for tjob in order}))
+            predicted = predict(expected, ('online', 'L0', 'L0p', 'L3p', 'L0s', 'L3s'), evaluations)
             l0, l3 = bottleneck_sides(expected, 'L0'), bottleneck_sides(expected, 'L3')
             assert l0.keys() == l3.keys()
             sides.update((l0[tjob], l3[tjob]) for tjob in l0)
@@ -148,7 +176,14 @@ def run_condition(params, interval):  # 1条件の実行（誤差のリストと
             actual = actuals[tjob][name]
             errors.append((name, actual -known.now, retried[tjob],
                 {label: values[tjob, name] -actual for label, values in merged.items()}))
-    return env, len(snapshots), errors, sides
+    agree = Counter()  # 作業場の列の隣り合う組のうち，実際のピッキングの順と同じものの数
+    for model, order, n_history in orders:
+        starts = [actual_times(tjob, n_history[tjob], env).get('P') for tjob in order]
+        for prev, next_ in zip(starts, starts[1:]):
+            if prev is not None and next_ is not None:
+                agree[model, 'pairs'] += 1
+                agree[model, 'agree'] += prev < next_
+    return env, len(snapshots), errors, sides, agree, differs
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 def summarize(errors):  # 集計（比べる時刻・区分・ピッキング・モデルごと）
@@ -183,12 +218,15 @@ def main():
         writer = None
         for vehicle, releasable in itertools.product(args.vehicles, args.releasables):
             errors, per_seed, sides, began, n_snapshots = [], {}, Counter(), time.time(), 0
+            agree, differs = Counter(), Counter()
             for seed in args.seeds:
                 params = {'PJOB': args.pjob, 'SEED': seed, 'VEHICLE': vehicle, 'RELEASABLE': releasable}
-                _, n, errs, side = run_condition(params, args.interval)
+                _, n, errs, side, agr, dif = run_condition(params, args.interval)
                 errors += errs
                 per_seed[seed] = errs
                 sides += side
+                agree += agr
+                differs += dif
                 n_snapshots += n
             for seed, errs in (*per_seed.items(), ('all', errors)):
                 for row in summarize(errs):
@@ -200,6 +238,11 @@ def main():
             total = sum(sides.values())
             print(f'VEHICLE={vehicle} RELEASABLE={releasable}: {n_snapshots} snapshots, {len(errors)} targets, {time.time() -began:.0f} s')
             print('  bottleneck (L0p, L3p):', ', '.join(f'{a}/{b} {n /total:.1%}' for (a, b), n in sorted(sides.items(), key=str)))
+            for model in ('L0s', 'L3s'):
+                length = model[:2]
+                print(f'  {model}: station order agreement {agree[model, "agree"]}/{agree[model, "pairs"]}'
+                    f' = {agree[model, "agree"] /max(agree[model, "pairs"], 1):.1%},'
+                    f' first P differs {differs[length, "first_differs"]}/{differs[length, "stations"]}')
 
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
 if __name__ == '__main__':

@@ -145,6 +145,8 @@ class BlockGraph(StateReader):
         self.terms = []
         self.block_of = {}  # (TJob, 型) -> ブロック
         self.by_floor = {}  # (系列, 階層) -> 到着・再帰還・帰還ブロックのリスト
+        self.station_lists = {}  # 作業場 -> (確定した列，順序が未確定の作業ブロック)（評価で使う）
+        self.fan_terms = set()  # 作業場の列の扇の項（直列化で鎖に置き換える）
         for tjob in gtps.unrestored_tjobs:
             self.add_tjob(tjob)
         self.add_start_terms()
@@ -408,34 +410,52 @@ class BlockGraph(StateReader):
         works = {}  # 作業場 -> 作業ブロックのリスト
         for block in self.ports:
             works.setdefault(block.tjob.pjob.station.picker, []).append(block)
-        capacity = self.env.CONV_LEN[2]
         for picker, blocks in works.items():
             confirmed = [self.block_of[tjob, 'work'] for tjob in self.station_queue(picker)]
-            if not confirmed:
-                continue
             members = set(confirmed)
             others = [block for block in blocks if block not in members]
-            # 作業場：前のTJobの搬出（空になるならピッキング）が終わってから，次の搬入
-            users = [block for block in confirmed if 'Q' in self.ports[block]]
-            self.add_lagged_terms(('station', picker), users, others, 1, 'Q', 'P', 0.0)
-            # 往路の容量：conv2^FW に空きができる（C2台前の搬入の終了）
-            self.add_lagged_terms(('capacity', picker, FW), confirmed, others, capacity, 'P', 'Y', None)
-            # 復路の容量・順序：空になるバケットは conv2^BW を使わないので，列に数えない
-            confirmed = [block for block in confirmed if 'O' in self.ports[block]]
-            others = [block for block in others if 'O' in self.ports[block]]
-            self.add_lagged_terms(('capacity', picker, BW), confirmed, others, capacity, 'O', 'Q', 0.0)
-            self.add_lagged_terms(('order', picker, BW), confirmed, others, 1, 'O', 'O', self.env.LT_LOOP)
+            self.station_lists[picker] = (confirmed, others)  # 確定した列が空の作業場も残す（直列化で使う）
+            if not confirmed:
+                continue
+            for rule in self.station_rules(picker):
+                self.add_lagged_terms(rule, self.station_members(rule, confirmed), self.station_members(rule, others))
 # ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
-    def add_lagged_terms(self, resource: tuple, confirmed: list[DirectBlock], others: list[DirectBlock], lag: int,
-            src_port: str, dst_port: str, value: float | None) -> None:
-        # 列の中で lag 台前のTJobから張る．順序が未確定のものへは，次に列に入るとみなして張る（valueがNoneなら搬入の残り時間）
-        pairs = list(zip(confirmed, confirmed[lag:]))
+    def pick_node(self, block: DirectBlock) -> tuple | None:  # ピッキングの開始の時刻を持つノード（過ぎていればNone）
+        return block.port_key('P') if 'P' in self.ports[block] else None
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def station_rules(self, picker: int) -> list[tuple]:  # 作業場の列に沿って張る項の規則
+        # （資源，何台前から張るか，元のポート，先のポート，値（Noneなら搬入の残り時間），列に数えるのに要るポート）
+        capacity = self.env.CONV_LEN[2]
+        return [
+            (('station', picker), 1, 'Q', 'P', 0.0, 'Q'),  # 作業場：前のTJobの搬出（空になるならピッキング）が終わってから，次の搬入
+            (('capacity', picker, FW), capacity, 'P', 'Y', None, None),  # 往路の容量：conv2^FW に空きができる（C2台前の搬入の終了）
+            (('capacity', picker, BW), capacity, 'O', 'Q', 0.0, 'O'),  # 復路の容量：空になるバケットは conv2^BW を使わないので，列に数えない
+            (('order', picker, BW), 1, 'O', 'O', self.env.LT_LOOP, 'O'),  # 復路の順序
+        ]
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def station_members(self, rule: tuple, blocks: list[DirectBlock]) -> list[DirectBlock]:  # その規則の列に数えるブロック
+        port = rule[5]
+        return blocks if port is None else [block for block in blocks if port in self.ports[block]]
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def add_lagged_terms(self, rule: tuple, confirmed: list[DirectBlock], others: list[DirectBlock]) -> None:
+        # 列の中で lag 台前のTJobから張る（鎖）．順序が未確定のものへは，次に列に入るとみなして張る（扇）
+        lag = rule[1]
+        for src, dst in zip(confirmed, confirmed[lag:]):
+            term = self.station_term(rule, src, dst)
+            if term is not None:
+                self.terms.append(term)
         if len(confirmed) >= lag:
-            pairs += [(confirmed[-lag], block) for block in others]
-        for src, dst in pairs:
-            if src_port not in self.ports[src] or dst_port not in self.ports[dst]:
-                continue  # 過ぎたポート
-            if dst.running and (dst_port, dst.head[0]) in (('Y', 15), ('Q', 19), ('O', 22)):
-                continue  # すでに使い始めている
-            length = src.end(17) -src.start(17) if value is None else value
-            self.terms.append(Term(src.port_key(src_port), dst.port_key(dst_port), 'station', resource, length if self.length == 'L0' else 0))
+            for dst in others:
+                term = self.station_term(rule, confirmed[-lag], dst)
+                if term is not None:
+                    self.terms.append(term)
+                    self.fan_terms.add(term)
+# ----- ----- ----- ----- ----- ----- ----- ----- ----- -----
+    def station_term(self, rule: tuple, src: DirectBlock, dst: DirectBlock) -> Term | None:  # 作業場の列で src の後に dst が来るときの項
+        resource, _, src_port, dst_port, value, _ = rule
+        if src_port not in self.ports[src] or dst_port not in self.ports[dst]:
+            return None  # 過ぎたポート
+        if dst.running and (dst_port, dst.head[0]) in (('Y', 15), ('Q', 19), ('O', 22)):
+            return None  # すでに使い始めている
+        length = src.end(17) -src.start(17) if value is None else value
+        return Term(src.port_key(src_port), dst.port_key(dst_port), 'station', resource, length if self.length == 'L0' else 0)

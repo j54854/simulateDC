@@ -49,22 +49,21 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブ
 
 搬送制御は `DefaultController` に集約されており，各ユニットのプロセスから `dispatch_pjobs`・`dispatch_shuttle`・`dispatch_lift`・`dispatch_loop` が呼ばれる．研究用の制御方策はこれをサブクラス化して `controller_cls` に渡す（例: `examples/run_gtpsim.py` の `MyController`）．仕様の詳細は `docs/controller_api.md`．
 
-### TJob グラフ（`gtp/graph.py`）
+### TJob グラフ v1（旧実装，`gtp/graph.py`）
 
-`TJobGraph(gtps).update()` が，システム内の TJob をノードとしてピッキング可能順序を表す `networkx.MultiDiGraph` を返す．`models.py` の状態を読むだけで書き換えず，`models.py` からは参照しない（コントローラ側から使う）．仕様は `docs/tjob_graph.md`．
+`TJobGraph(gtps).update()` が，システム内の TJob をノードとしてピッキング可能順序を表す `networkx.MultiDiGraph` を返す．`models.py` の状態を読むだけで書き換えず，`models.py` からは参照しない（コントローラ側から使う）．仕様は `docs/tjob_graph_v1.md`．
 
-### 縮約グラフ（`gtp/block_graph.py`）と，その参照実装（`gtp/operation_graph.py`・`gtp/reduction.py`）
+### ブロックグラフ（縮約グラフ，`gtp/block_graph.py`）と，その参照実装（`gtp/operation_graph.py`・`gtp/reduction.py`）
 
-`BlockGraph(gtps, length='L0' または 'L3')` が，状態から縮約グラフの項を直接作る（`tables` を使い回すと速い）．参照実装 `Reduction(OnlineGraph(gtps))` と項が一致することをテストで確かめている．状態の読み取りは `gtp/state.py` の `StateReader` を両方で共有する．仕様は `docs/tjob_graph.md`．
-
+`BlockGraph(gtps, length='L0' または 'L3')` が，状態から縮約グラフの項を直接作る（`tables` を使い回すと速い）．参照実装 `Reduction(OnlineGraph(gtps))` と項が一致することをテストで確かめている．状態の読み取りは `gtp/state.py` の `StateReader` を両方で共有する．仕様は `docs/block_graph.md`．
 
 `OnlineGraph(gtps)` が，時刻 t の状態から作業レベルのオンライングラフを作る．`models.py` の状態を読むだけで，速さは問わない検証用の実装．仕様は `docs/operation_graph.md`．実行中のピッキングの残り時間は，既定では期待値（`known_pick=True` は検証専用で，実現値を先読みする）．
 
-`gtp/reduction.py` の `Reduction(online)` が，それを機械的に縮約する（`ports` でポートの有無，`length` で L0・L3 を切り替える）．実績との比較は `examples/measure_reduction.py`（全条件で約31分かかる）．仕様は `docs/tjob_graph.md`．
+`gtp/reduction.py` の `Reduction(online)` が，それを機械的に縮約する（`ports` でポートの有無，`length` で L0・L3 を切り替える）．実績との比較は `examples/measure_reduction.py`（全条件で約31分かかる）．仕様は `docs/block_graph.md`．
 
-### 縮約グラフの評価（`gtp/evaluation.py`，名前は仮）
+### ブロックグラフの評価（`gtp/evaluation.py`，名前は仮）
 
-`Evaluation(BlockGraph(gtps))` が，時刻の小さい順にノードを確定する最長経路で各ノードの時刻を求め，作業場の順が未確定の TJob を作業場の列に並べる（直列化．段階 E1）．`serialize=False` なら扇のままの最長経路で，参照実装の `Reduction.times()` と一致する．出力は作業場ごとの列（`orders`）と P のベクトル（`picks`）など．仕様と結果は `docs/tjob_graph.md` の「評価（直列化）の段階」．作業場の列での位置・スロットごとの精度は `examples/measure_evaluation.py`（全条件で約30秒）で測る．
+`Evaluation(BlockGraph(gtps))` が，時刻の小さい順にノードを確定する最長経路で各ノードの時刻を求め，作業場の順が未確定の TJob を作業場の列に並べる（直列化．段階 E1）．`serialize=False` なら扇のままの最長経路で，参照実装の `Reduction.times()` と一致する．出力は作業場ごとの列（`orders`）と P のベクトル（`picks`）など．仕様と結果は `docs/block_graph.md` の「評価（直列化）の段階」．作業場の列での位置・スロットごとの精度は `examples/measure_evaluation.py`（全条件で約30秒）で測る．
 
 ## 注意点
 
@@ -79,5 +78,8 @@ CSV ログ（`data/gtpsim_log.csv`）は `env.gtps.dump_log()`，搬送ジョブ
 - `docs/parameters.md` — パラメータのデフォルト値・単位・説明
 - `docs/controller_api.md` — コントローラ API リファレンス
 - `docs/tjob_lifecycle.md` — TJob の状態遷移と，各状態でのバケット所在・保持データ構造
-- `docs/operation_graph.md` — オペレーショングラフ（TJob を仕事，設備を機械とする no-buffer の先行関係グラフ）の定義．TJob グラフはこれを縮約したものと位置づける
-- `docs/tjob_graph.md` — TJob グラフの仕様．オペレーショングラフの縮約としての定義（剛体近似の長さ L0，作業ブロックのポート，運用で使う簡略化した長さ L3）と，現行実装（`gtp/graph.py`，1ノード縮約の旧版）の仕様．グラフ関連の作業前に必ず参照
+- `docs/operation_graph.md` — オペレーショングラフ（TJob を仕事，設備を機械とする no-buffer の先行関係グラフ）の定義．各系統のグラフの土台
+- `docs/tjob_graph.md` — TJob グラフの入口．系統ごとの文書の地図・系譜・共通の用語．グラフ関連の作業前に必ず参照
+- `docs/flow_graph.md` — 整流グラフ（仮称）．時刻を使わず，整流化（目標の順序どおりに流れているか）で評価する系統．検討中で実装なし．現在の検討の中心
+- `docs/block_graph.md` — ブロックグラフ（縮約グラフ）の仕様．3ブロックへの縮約（剛体近似の長さ L0，作業ブロックのポート，簡略化した長さ L3），参照実装・直接構築・評価 E1 とその結果．比較・参照用として残す
+- `docs/tjob_graph_v1.md` — 旧実装（`gtp/graph.py`，1ノード縮約）の仕様と閉路の性質

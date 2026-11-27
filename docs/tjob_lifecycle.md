@@ -60,7 +60,9 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 | | コンベヤ末尾で台車割付け待ち | `Conveyor` | `loop.tjobs` | |
 | | 台車割付け済み，`AISLE_SEG` へ移動中 | `Conveyor` | `car.assigned_tjob` | `Loop.drive()`：台車への積込み |
 | `ON_FW_LOOP` | 台車に積載し，`PICKER_SEG` へ移動中 | `Loop` | `car.assigned_tjob` | `Loop.drive()`：stage 2 への荷卸し |
-| | 荷卸し失敗（先行ジョブが遅れている）による周回中 | `Loop` | `car.assigned_tjob` | 失敗回数（`tjob.failure_count`）が `REPEATABLE` を超えると `Loop.handle_failure()` で `ON_BW_LOOP` へ |
+| | 荷卸し失敗（先行ジョブが遅れている）による周回中．その場では待たずに前進する | `Loop` | `car.assigned_tjob` | 失敗回数（`tjob.failure_count`）が `REPEATABLE` を超えると `Loop.handle_failure()` で `ON_BW_LOOP` へ |
+| | 先行関係は満たすが，stage 2 の出庫コンベヤの先頭が空かず，その場で荷卸し待ち | `Loop` | `car.assigned_tjob` | `Loop.drive()`：先頭が空けば荷卸し．後続台車に押されると押し出しによる周回へ |
+| | 押し出しによる周回中（行き先は変えずに1つ前進し，1周して戻る） | `Loop` | `car.assigned_tjob` | 失敗回数に数えない |
 | `TO_PICKED` | stage 2 の出庫コンベヤ上を移動中 | `Conveyor` | なし | |
 | | コンベヤ末尾で作業場待ち | `Conveyor` | `station.tjobs` | |
 | | 作業場へ搬入中 → ピッキング作業中 | `Conveyor` → `Station` | `assigned_tjob` | `Station.operate()`：作業完了（`picked_time`・`work_time` を記録） |
@@ -68,6 +70,8 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 | | stage 2 の入庫コンベヤ上を移動中 | `Conveyor` | なし | |
 | | コンベヤ末尾で台車割付け待ち → 台車割付け済み | `Conveyor` | `loop.tjobs` → `car.assigned_tjob` | `Loop.drive()`：台車への積込み |
 | `ON_BW_LOOP` | 台車に積載し，`AISLE_SEG` の入庫側へ移動中 | `Loop` | `car.assigned_tjob` | `Loop.drive()`：stage 1 への荷卸し |
+| | stage 1 の入庫コンベヤの先頭が空かず，その場で荷卸し待ち | `Loop` | `car.assigned_tjob` | `Loop.drive()`：先頭が空けば荷卸し．後続台車に押されると押し出しによる周回へ |
+| | 押し出しによる周回中（行き先は変えずに1つ前進し，1周して戻る） | `Loop` | `car.assigned_tjob` | 失敗回数に数えない |
 | `TO_BW_LIFT` | stage 1 の入庫コンベヤ上 → 末尾でリフト待ち | `Conveyor` | なし → `lift.tjobs` | |
 | | リフト割付け済み，積載して目的階へ | `Conveyor` → `Lift` | `assigned_tjob` | `Lift.operate()`：stage 0 への荷卸し |
 | `TO_BW_SHTL` | stage 0 の入庫コンベヤ上 → 末尾でシャトル待ち | `Conveyor` | なし → `shuttle.tjobs` | |
@@ -99,6 +103,7 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 - **`TO_FW_SHTL` の待ちは2種類**：1つのバケットに複数の搬送ジョブが割り付けられることがあり，`bucket.current_tjob()` でないジョブはバケットの帰還を待っている．着手可能でも先行関係制約（`DefaultController.precedence_filter()`．使うかどうかは方策による）で後回しにされることがある
 - **再搬送では同じ TJob が経路を2周以上する**：`retry_needed == True` の間（`ON_BW_LOOP` 〜 `TO_BW_SHTL`）はピッキングせずに置場へ戻る途中．`picked_time` は `None` のままで，`unpicked_tjobs` にも残る．回数は `retry_count` に記録される
 - **空になったバケット**：ピッキングでバケットが空になると，入庫経路を通らず即座に置場へ戻され（新バケット扱い），`bucket.tjobs` はクリアされる．`tjob.bucket` の参照は残る
+- **ループの周回は2種類**：荷卸し失敗（`ON_FW_LOOP` で先行ジョブが遅れている）による周回と，押し出しによる周回がある．押し出しは，先行関係は満たすが受け側のコンベヤの先頭が空かずにその場で待っている台車が，後続台車に押されて1つ前進するもので，往路（stage 2）でも復路（stage 1）でも起きる（`Loop.drive()`・`Loop.move_ahead()`）．押し出しは `failure_count` に数えず，履歴にも `fail` を残さないので，`REPEATABLE` による再搬送の判定にも入らない．履歴から周回を数えるときは，`fail` だけでは足りない．荷卸しできた台車も，押されていれば待機ではなく退避ノードへ移る
 - **入庫リフトの参照**：入庫リフトは荷卸し後，0階へ戻るまで（既に `TO_BW_SHTL` になった）ジョブを `assigned_tjob` に保持し続ける（復帰中の占有）
 - **記録される時刻**：`released_time`・`picked_time`・`restored_time`・`work_time` に加えて，次の記録がある（「時刻の記録」）
 
@@ -131,7 +136,7 @@ DONE       ──(retry_needed = True)──▶ TO_FW_SHTL（再搬送）
 | `proceed` | `TJob.proceed()`（進捗の変化．再搬送では `TO_FW_SHTL` に戻った後の進捗） | — | — |
 
 - 移載の直前の作業（積替え・セル間移動・搬入・搬出）は処理時間が固定なので，開始時刻は「移載の終了 − 処理時間」で逆算できる．移載の前に受け手の空きを待つ場合も，待ちは処理時間の前に入るので，この逆算は正しい
-- 作業ブロックのポート（[tjob_graph.md](tjob_graph.md) の「作業ブロックのポート」）は次のように読める
+- 作業ブロックのポート（[block_graph.md](block_graph.md) の「作業ブロックのポート」）は次のように読める
   - Y（荷卸しの開始）：台車 → conv2^FW[0] の `transfer` の時刻 − `LT_LOOP`
   - P（搬入の開始）：conv2^FW の末尾 → 作業場の `transfer` の時刻 − `MT_CONV`
   - Q（搬出の完了）：作業場 → conv2^BW[0] の `transfer` の時刻（空になるバケットは，ピッキング完了の `proceed` の時刻）

@@ -36,7 +36,7 @@ $ uv run examples/show_gtpsim.py
 - [パラメータ一覧](docs/parameters.md) — シミュレーションパラメータのデフォルト値・単位・説明
 - [コントローラ API](docs/controller_api.md) — `DefaultController` のサブクラス化によるカスタム制御ロジックの実装方法
 - [搬送ジョブのライフサイクル](docs/tjob_lifecycle.md) — `TJob` の状態遷移・バケットの所在・保持するデータ構造
-- [搬送ジョブグラフ](docs/tjob_graph.md) — `TJob` をノードとしてピッキング可能順序を表す有向グラフの仕様（実装前）
+- [搬送ジョブグラフ](docs/tjob_graph.md) — ディスパッチの評価に使うグラフ（オペレーショングラフ・旧実装・ブロックグラフ・整流グラフ）の文書の入口
 
 ## 開発者向け
 

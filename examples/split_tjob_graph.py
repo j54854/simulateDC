@@ -4,7 +4,7 @@ import networkx as nx
 from gtp import *
 
 # 【検討中の案の試作】ループより上流の TJob を到着ノードと作業ノードに分け，閉路がなくなるかを確かめる
-# 案の内容は docs/tjob_graph.md の「後回しにした項目」を参照．エッジの長さは考慮せず，構造だけを見る
+# 案の内容は docs/tjob_graph_v1.md の「後回しにした項目」を参照．エッジの長さは考慮せず，構造だけを見る
 UPSTREAM = {'conv1', 'lift', 'conv0', 'shuttle', 'store', 'beyond_store'}  # 分割する位置
 PARAMS_LIST = [
     {'PJOB': 50, 'SEED': 42},

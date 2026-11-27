@@ -1,6 +1,6 @@
 """縮約グラフの評価（時刻順の最長経路と，作業場の直列化）
 
-仕様は docs/tjob_graph.md の「評価（直列化）の段階」．モジュール名・クラス名は仮．
+仕様は docs/block_graph.md の「評価（直列化）の段階」．モジュール名・クラス名は仮．
 グラフ（BlockGraph）を読むだけで書き換えない．
 """
 from __future__ import annotations

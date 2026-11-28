@@ -160,6 +160,11 @@ class DefaultController:
     def dispatch_pjobs(self, waiting_pjobs: list[PJob], last_picker: int) -> tuple[PJob, int]:
         """次に投入するピッキングジョブと作業場番号を決定する。
 
+        注意（既知の不具合，未修正）: PJob は waiting_pjobs の先頭から（ID 順に）投入すること。
+        荷卸しの判定は pjob.idx の大小で先行ジョブを決め，バケットの割付けは投入の順に行うため，
+        ID 順以外で投入すると，作業場の順が入れ子になり，同じバケットを使うジョブどうしが
+        互いに待って搬送が止まりうる。詳細は docs/controller_api.md の「既知の不具合」を参照。
+
         Args:
             waiting_pjobs: 投入待ちのピッキングジョブリスト。
                 先頭から pop(0) して取り出すこと（リストを直接変更してよい）。

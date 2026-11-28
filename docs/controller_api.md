@@ -146,6 +146,20 @@ candidate_tjobs = self.echelon_filter(candidate_tjobs, Progress.TO_FW_LOOP)
 
 ---
 
+## 既知の不具合: PJob を ID 順以外で投入すると壊れる（要修正）
+
+2026-11-29 に判明．**未修正**．修正するまで，`dispatch_pjobs` をオーバーライドするときは，PJob を `waiting_pjobs` の先頭から（ID 順に）投入し，選ぶのは作業場だけにすること．
+
+`dispatch_pjobs` は `waiting_pjobs` から任意の PJob を選べる．一方，荷卸しの可否（`TJob.late_preceding_tjob_count()`）は，先行ジョブを投入の順ではなく `pjob.idx` の大小で決める（`TJob.get_preceding_tjobs()`．まだ投入されていない PJob は作業場が `None` なので含まれない）．このため，同じ作業場で番号の大きい PJob を先に投入すると，次のことが起きる．例は P5 を P3 より先に投入した場合．
+
+- **作業場の順が入れ子になる**：P5 のジョブがいくつか荷卸しされた後で P3 が投入されると，P3 は P5 の残りより先になる（実際の順は「P5 の一部 → P3 → P5 の残り」）
+- **行き詰まりうる**：バケットの割付けは投入の順に行われる（`PJob.release_pjob()`）．同じバケットを P5 のジョブ x が先に，P3 のジョブ y が後に使うとき，x が荷卸し前なら，x は先行ジョブ y の荷卸しを待ち，y は x がバケットを戻すのを待つので，搬送が止まる
+- フローグラフの「閉路がないこと」の前提（バケットの割付けが PJob の順）も崩れる（[flow_graph.md](flow_graph.md)）
+
+**対策の案**：投入した時点で PJob に投入の順の番号を振り（投入までは `None`），荷卸しの判定（`get_preceding_tjobs()` の「先行すべき PJob」）はその番号で行う．`pjob.idx` はログ・CSV 出力・グラフのキーなどで識別子として使っているので，番号は別の属性として持たせるのがよい．`models.py` の変更なので，修正するときは golden test（`tests/test_regression.py`）が変わらないこと（ID 順に投入する既定の方策では結果が同じになるはず）を確かめる．
+
+---
+
 ## コントローラ内で参照可能な属性
 
 ### `TJob`
